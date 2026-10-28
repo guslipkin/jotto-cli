@@ -1,27 +1,11 @@
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, BufRead, Write};
 use std::str::FromStr;
 
 use crate::dict;
 use crate::game::{
-    Difficulty, GameMode, GameState, GameStatus, LetterState, ScratchState, MAX_WORDLE_GUESSES,
+    supports_color, Difficulty, GameMode, GameState, GameStatus, LetterState, ScratchState,
+    MAX_WORDLE_GUESSES,
 };
-
-/// Returns `true` if stdout supports ANSI color sequences and `NO_COLOR` is not set.
-fn supports_color() -> bool {
-    if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
-        return false;
-    }
-    if std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| v != "0" && !v.is_empty()) {
-        return true;
-    }
-    if std::env::var("TERM").is_ok_and(|t| t == "dumb") {
-        return false;
-    }
-    if std::env::var_os("CLICOLOR").is_some_and(|v| v == "0") {
-        return false;
-    }
-    io::stdout().is_terminal()
-}
 
 /// Runs the line-by-line REPL / Plain CLI mode for either Jotto or Wordle.
 pub fn run(mut game: GameState) -> io::Result<()> {

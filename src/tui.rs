@@ -17,7 +17,9 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 use ratatui::{Frame, Terminal};
 
 use crate::dict;
-use crate::game::{GameMode, GameState, GameStatus, LetterState, ScratchState, MAX_WORDLE_GUESSES};
+use crate::game::{
+    supports_color, GameMode, GameState, GameStatus, LetterState, ScratchState, MAX_WORDLE_GUESSES,
+};
 
 /// Okabe-Ito colorblind-safe palette
 const COLOR_ACCENT: Color = Color::Rgb(86, 180, 233); // Sky Blue (#56B4E9)
@@ -57,6 +59,7 @@ const FOOTER_ACTIONS: [(FooterAction, &str, &str); 7] = [
 
 struct TuiApp {
     game: GameState,
+    use_color: bool,
     input: String,
     focus: FocusPanel,
     scratch_cursor: usize,
@@ -94,6 +97,7 @@ impl TuiApp {
 
         Self {
             game,
+            use_color: supports_color(),
             input: String::new(),
             focus: FocusPanel::Guess,
             scratch_cursor: 0,
@@ -1019,21 +1023,33 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
                 let ch = (b'A' + i as u8) as char;
                 let span = match state {
                     Some(LetterState::Correct) => Span::styled(
-                        format!("+{ch}+{used_pad}"),
+                        if app.use_color {
+                            format!(" {ch} {used_pad}")
+                        } else {
+                            format!("+{ch}+{used_pad}")
+                        },
                         Style::default()
                             .fg(Color::Black)
                             .bg(COLOR_POSITIVE)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Some(LetterState::Present) => Span::styled(
-                        format!("?{ch}?{used_pad}"),
+                        if app.use_color {
+                            format!(" {ch} {used_pad}")
+                        } else {
+                            format!("?{ch}?{used_pad}")
+                        },
                         Style::default()
                             .fg(Color::Black)
                             .bg(COLOR_WARNING)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Some(LetterState::Absent) => Span::styled(
-                        format!("~{ch}~{used_pad}"),
+                        if app.use_color {
+                            format!(" {ch} {used_pad}")
+                        } else {
+                            format!("~{ch}~{used_pad}")
+                        },
                         Style::default()
                             .fg(Color::DarkGray)
                             .add_modifier(Modifier::CROSSED_OUT),
@@ -1061,9 +1077,9 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
             Line::from(used_row2),
         ]
     };
-    let used_title = match mode {
-        GameMode::Jotto => " Used Letters ",
-        GameMode::Wordle => " Used Letters (+exact ?present ~absent) ",
+    let used_title = match (mode, app.use_color) {
+        (GameMode::Jotto, _) | (GameMode::Wordle, true) => " Used Letters ",
+        (GameMode::Wordle, false) => " Used Letters (+exact ?present ~absent) ",
     };
     let used_widget = Paragraph::new(used_lines)
         .alignment(Alignment::Center)
@@ -1186,25 +1202,29 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
                 }
                 let tile = match state {
                     LetterState::Correct => Span::styled(
-                        " + ",
+                        if app.use_color { "   " } else { " + " },
                         Style::default()
                             .fg(Color::Black)
                             .bg(COLOR_POSITIVE)
                             .add_modifier(Modifier::BOLD),
                     ),
                     LetterState::Present => Span::styled(
-                        " ? ",
+                        if app.use_color { "   " } else { " ? " },
                         Style::default()
                             .fg(Color::Black)
                             .bg(COLOR_WARNING)
                             .add_modifier(Modifier::BOLD),
                     ),
                     LetterState::Absent => Span::styled(
-                        " ~ ",
-                        Style::default()
-                            .fg(Color::Gray)
-                            .bg(Color::DarkGray)
-                            .add_modifier(Modifier::CROSSED_OUT),
+                        if app.use_color { "   " } else { " ~ " },
+                        if app.use_color {
+                            Style::default().fg(Color::Gray).bg(Color::DarkGray)
+                        } else {
+                            Style::default()
+                                .fg(Color::Gray)
+                                .bg(Color::DarkGray)
+                                .add_modifier(Modifier::CROSSED_OUT)
+                        },
                     ),
                 };
                 spans.push(tile);
@@ -1316,21 +1336,33 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
                         }
                         let span = match state {
                             LetterState::Correct => Span::styled(
-                                format!("+{ch}+"),
+                                if app.use_color {
+                                    format!(" {ch} ")
+                                } else {
+                                    format!("+{ch}+")
+                                },
                                 Style::default()
                                     .fg(Color::Black)
                                     .bg(COLOR_POSITIVE)
                                     .add_modifier(Modifier::BOLD),
                             ),
                             LetterState::Present => Span::styled(
-                                format!("?{ch}?"),
+                                if app.use_color {
+                                    format!(" {ch} ")
+                                } else {
+                                    format!("?{ch}?")
+                                },
                                 Style::default()
                                     .fg(Color::Black)
                                     .bg(COLOR_WARNING)
                                     .add_modifier(Modifier::BOLD),
                             ),
                             LetterState::Absent => Span::styled(
-                                format!("~{ch}~"),
+                                if app.use_color {
+                                    format!(" {ch} ")
+                                } else {
+                                    format!("~{ch}~")
+                                },
                                 Style::default()
                                     .fg(Color::DarkGray)
                                     .add_modifier(Modifier::CROSSED_OUT),
@@ -1471,9 +1503,38 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
                 Line::from(""),
                 Line::from("Wordle is a game where you have 6 guesses to find the 5-letter word:"),
                 Line::from("  • Repeating letters are allowed; the word is not a proper noun."),
-                Line::from("  • +X+ (Green): Letter is in the word and in the exact spot."),
-                Line::from("  • ?X? (Orange): Letter is in the word, but in a different spot."),
-                Line::from("  • ~X~ (Gray/Crossed): Letter is not in the word in any spot."),
+                Line::from(vec![
+                    Span::raw("  • "),
+                    Span::styled(
+                        if app.use_color { " X " } else { "+X+" },
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(COLOR_POSITIVE)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" (Green): Letter is in the word and in the exact spot."),
+                ]),
+                Line::from(vec![
+                    Span::raw("  • "),
+                    Span::styled(
+                        if app.use_color { " X " } else { "?X?" },
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(COLOR_WARNING)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" (Orange): Letter is in the word, but in a different spot."),
+                ]),
+                Line::from(vec![
+                    Span::raw("  • "),
+                    Span::styled(
+                        if app.use_color { " X " } else { "~X~" },
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::CROSSED_OUT),
+                    ),
+                    Span::raw(" (Gray/Crossed): Letter is not in the word in any spot."),
+                ]),
                 Line::from(
                     "  • Daily Mode ([^T] or --daily): Deterministic UTC daily word challenge.",
                 ),

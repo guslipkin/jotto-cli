@@ -522,3 +522,22 @@ pub fn score_wordle_guess(secret: &str, guess: &str) -> [LetterState; 5] {
 
     states
 }
+
+/// Returns `true` if stdout supports ANSI color sequences and `NO_COLOR` is not set.
+pub fn supports_color() -> bool {
+    use std::io::IsTerminal;
+
+    if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
+        return false;
+    }
+    if std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| v != "0" && !v.is_empty()) {
+        return true;
+    }
+    if std::env::var("TERM").is_ok_and(|t| t == "dumb") {
+        return false;
+    }
+    if std::env::var_os("CLICOLOR").is_some_and(|v| v == "0") {
+        return false;
+    }
+    std::io::stdout().is_terminal()
+}
