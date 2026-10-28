@@ -3,14 +3,24 @@ name = "jotto"
 version = "0.1.0"
 edition = "2021"
 authors = ["Gus Lipkin"]
-description = "A CLI version of the classic Jotto word game written in Rust"
+description = "CLI versions of the classic Jotto and Wordle word games written in Rust"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/guslipkin/jotto-cli"
 build = "build.rs"
+default-run = "jotto"
+
+[[bin]]
+name = "jotto"
+path = "src/main.rs"
+
+[[bin]]
+name = "wordle"
+path = "src/bin/wordle.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.28"
 fastrand = "2.3"
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+

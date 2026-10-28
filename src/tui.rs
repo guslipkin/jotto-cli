@@ -17,7 +17,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 use ratatui::{Frame, Terminal};
 
 use crate::dict;
-use crate::game::{GameState, GameStatus, ScratchState};
+use crate::game::{GameMode, GameState, GameStatus, LetterState, ScratchState, MAX_WORDLE_GUESSES};
 
 /// Okabe-Ito colorblind-safe palette
 const COLOR_ACCENT: Color = Color::Rgb(86, 180, 233); // Sky Blue (#56B4E9)
@@ -62,6 +62,7 @@ struct TuiApp {
     scratch_cursor: usize,
     guess_area: Rect,
     scratch_area: Rect,
+    status_area: Rect,
     footer_buttons: [Rect; 7],
     message: Option<(String, Color)>,
     show_help: bool,
@@ -71,20 +72,24 @@ struct TuiApp {
 
 impl TuiApp {
     fn new(game: GameState) -> Self {
+        let mode = game.mode();
         let initial_message = if let Some(date) = game.daily_date() {
             (
                 format!(
                     "Daily Challenge ({date} UTC) started!\nDifficulty: {} ({} words).",
                     game.difficulty(),
-                    dict::word_count(game.difficulty().scowl_size())
+                    dict::word_count(mode, game.difficulty().scowl_size())
                 ),
                 COLOR_ACCENT,
             )
         } else {
-            (
-                "Enter a 5-letter word with no repeating letters.".to_string(),
-                Color::Gray,
-            )
+            let prompt = match mode {
+                GameMode::Jotto => "Enter a 5-letter word with no repeating letters.",
+                GameMode::Wordle => {
+                    "Enter a 5-letter word (6 guesses max, repeating letters allowed)."
+                }
+            };
+            (prompt.to_string(), Color::Gray)
         };
 
         Self {
@@ -94,6 +99,7 @@ impl TuiApp {
             scratch_cursor: 0,
             guess_area: Rect::default(),
             scratch_area: Rect::default(),
+            status_area: Rect::default(),
             footer_buttons: [Rect::default(); 7],
             message: Some(initial_message),
             show_help: false,
@@ -139,15 +145,19 @@ impl TuiApp {
             _ => {}
         }
 
+        let mode = self.game.mode();
         let prev_len = self.game.history().len();
         match self.game.make_guess(&trimmed) {
             Ok(round) => {
                 let is_duplicate = self.game.history().len() == prev_len;
                 if is_duplicate {
-                    let row_idx = prev_len.saturating_sub(round.round);
+                    let row_idx = match mode {
+                        GameMode::Jotto => prev_len.saturating_sub(round.round),
+                        GameMode::Wordle => round.round.saturating_sub(1),
+                    };
                     self.table_state.select(Some(row_idx));
-                    self.message = Some((
-                        format!(
+                    let dup_msg = match mode {
+                        GameMode::Jotto => format!(
                             "Already guessed '{}' in Round {} ({} {} in common).",
                             round.guess.to_ascii_uppercase(),
                             round.round,
@@ -158,41 +168,81 @@ impl TuiApp {
                                 "letters"
                             }
                         ),
-                        COLOR_WARNING,
-                    ));
+                        GameMode::Wordle => format!(
+                            "Already guessed '{}' in Guess {}.",
+                            round.guess.to_ascii_uppercase(),
+                            round.round
+                        ),
+                    };
+                    self.message = Some((dup_msg, COLOR_WARNING));
                     return;
                 }
 
-                self.table_state.select(Some(0));
-                if self.game.status() == GameStatus::Won {
-                    self.message = Some((
-                        format!(
-                            "CONGRATULATIONS!!! You guessed {} in {} {}.\nClick [New Game] or press [^N] to play again.",
-                            self.game.secret_word().to_ascii_uppercase(),
-                            self.game.history().len(),
-                            if self.game.history().len() == 1 {
-                                "guess"
-                            } else {
-                                "guesses"
+                let selected_row = match mode {
+                    GameMode::Jotto => 0,
+                    GameMode::Wordle => self.game.history().len().saturating_sub(1),
+                };
+                self.table_state.select(Some(selected_row));
+
+                match self.game.status() {
+                    GameStatus::Won => {
+                        let win_msg = match mode {
+                            GameMode::Jotto => format!(
+                                "CONGRATULATIONS!!! You guessed {} in {} {}.\nClick [New Game] or press [^N] to play again.",
+                                self.game.secret_word().to_ascii_uppercase(),
+                                self.game.history().len(),
+                                if self.game.history().len() == 1 {
+                                    "guess"
+                                } else {
+                                    "guesses"
+                                }
+                            ),
+                            GameMode::Wordle => format!(
+                                "You guessed {} in {}/{}!\nClick/[C] Copy | [^N] New Game",
+                                self.game.secret_word().to_ascii_uppercase(),
+                                self.game.history().len(),
+                                MAX_WORDLE_GUESSES
+                            ),
+                        };
+                        self.message = Some((win_msg, COLOR_POSITIVE));
+                    }
+                    GameStatus::Lost => {
+                        self.message = Some((
+                            format!(
+                                "Out of guesses! Word: {}\nClick/[C] Copy | [^N] New Game",
+                                self.game.secret_word().to_ascii_uppercase()
+                            ),
+                            COLOR_NEGATIVE,
+                        ));
+                    }
+                    GameStatus::Playing | GameStatus::GivenUp => {
+                        let status_msg = match mode {
+                            GameMode::Jotto => format!(
+                                "Round {}: '{}' has {} {} in common.",
+                                round.round,
+                                round.guess.to_ascii_uppercase(),
+                                round.common,
+                                if round.common == 1 {
+                                    "letter"
+                                } else {
+                                    "letters"
+                                }
+                            ),
+                            GameMode::Wordle => {
+                                let remaining =
+                                    MAX_WORDLE_GUESSES.saturating_sub(self.game.history().len());
+                                format!(
+                                    "Guess {}/{}: '{}' ({} {} remaining).",
+                                    round.round,
+                                    MAX_WORDLE_GUESSES,
+                                    round.guess.to_ascii_uppercase(),
+                                    remaining,
+                                    if remaining == 1 { "guess" } else { "guesses" }
+                                )
                             }
-                        ),
-                        COLOR_POSITIVE,
-                    ));
-                } else {
-                    self.message = Some((
-                        format!(
-                            "Round {}: '{}' has {} {} in common.",
-                            round.round,
-                            round.guess.to_ascii_uppercase(),
-                            round.common,
-                            if round.common == 1 {
-                                "letter"
-                            } else {
-                                "letters"
-                            }
-                        ),
-                        COLOR_ACCENT,
-                    ));
+                        };
+                        self.message = Some((status_msg, COLOR_ACCENT));
+                    }
                 }
             }
             Err(err) => {
@@ -210,7 +260,7 @@ impl TuiApp {
             format!(
                 "New game started!\nDifficulty: {} ({} words).",
                 self.game.difficulty(),
-                dict::word_count(self.game.difficulty().scowl_size())
+                dict::word_count(self.game.mode(), self.game.difficulty().scowl_size())
             ),
             COLOR_ACCENT,
         ));
@@ -226,7 +276,7 @@ impl TuiApp {
             format!(
                 "Daily Challenge ({date_str} UTC) started!\nDifficulty: {} ({} words).",
                 self.game.difficulty(),
-                dict::word_count(self.game.difficulty().scowl_size())
+                dict::word_count(self.game.mode(), self.game.difficulty().scowl_size())
             ),
             COLOR_ACCENT,
         ));
@@ -253,6 +303,10 @@ impl TuiApp {
     }
 
     fn toggle_focus(&mut self) {
+        if self.game.mode() == GameMode::Wordle {
+            self.focus = FocusPanel::Guess;
+            return;
+        }
         self.focus = match self.focus {
             FocusPanel::Guess => FocusPanel::Scratch,
             FocusPanel::Scratch => FocusPanel::Guess,
@@ -272,6 +326,41 @@ impl TuiApp {
         if len > 0 {
             let i = self.table_state.selected().unwrap_or(0);
             self.table_state.select(Some((i + 1).min(len - 1)));
+        }
+    }
+
+    fn copy_wordle_summary(&mut self) {
+        if self.game.mode() != GameMode::Wordle
+            || !matches!(self.game.status(), GameStatus::Won | GameStatus::Lost)
+            || self.game.history().is_empty()
+        {
+            return;
+        }
+        let summary = self.game.wordle_share_summary();
+        let _ = copy_to_clipboard(&summary);
+        let feedback = "Copied summary! | [^N] New Game";
+        match self.game.status() {
+            GameStatus::Won => {
+                self.message = Some((
+                    format!(
+                        "You guessed {} in {}/{}!\n{feedback}",
+                        self.game.secret_word().to_ascii_uppercase(),
+                        self.game.history().len(),
+                        MAX_WORDLE_GUESSES
+                    ),
+                    COLOR_POSITIVE,
+                ));
+            }
+            GameStatus::Lost => {
+                self.message = Some((
+                    format!(
+                        "Out of guesses! Word: {}\n{feedback}",
+                        self.game.secret_word().to_ascii_uppercase()
+                    ),
+                    COLOR_NEGATIVE,
+                ));
+            }
+            _ => {}
         }
     }
 
@@ -323,7 +412,16 @@ impl TuiApp {
             return;
         }
 
-        // Check Scratch box click (does not activate/steal focus from Guess box)
+        // In Wordle mode, clicking the Status box when the game is won/lost copies the summary
+        if self.game.mode() == GameMode::Wordle && rect_contains(self.status_area, col, row) {
+            self.copy_wordle_summary();
+            return;
+        }
+
+        // Check Scratch box click (only in Jotto mode; does not steal focus from Guess box)
+        if self.game.mode() != GameMode::Jotto {
+            return;
+        }
         let area = self.scratch_area;
         if !rect_contains(area, col, row) {
             return;
@@ -368,6 +466,76 @@ impl TuiApp {
     }
 }
 
+fn encode_base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn copy_to_clipboard(text: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    // Emit OSC 52 clipboard sequence for modern terminals (iTerm2, Ghostty, Kitty, WezTerm, etc.)
+    let b64 = encode_base64(text.as_bytes());
+    let mut out = io::stdout();
+    let _ = write!(out, "\x1b]52;c;{b64}\x07");
+    let _ = out.flush();
+
+    let commands: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbcopy", &[])]
+    } else if cfg!(target_os = "windows") {
+        &[("clip", &[])]
+    } else {
+        &[
+            ("wl-copy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+        ]
+    };
+
+    for &(cmd, args) in commands {
+        if let Ok(mut child) = Command::new(cmd)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                if stdin.write_all(text.as_bytes()).is_ok() {
+                    drop(stdin);
+                    if let Ok(status) = child.wait() {
+                        if status.success() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
 fn letter_cell_width(inner_width: u16) -> u16 {
     if inner_width >= 13 * 4 {
         4
@@ -378,6 +546,49 @@ fn letter_cell_width(inner_width: u16) -> u16 {
 
 fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+}
+
+fn wrapped_line_count(text: &str, max_width: u16) -> u16 {
+    let max_w = max_width.max(1) as usize;
+    let mut total_lines = 0u16;
+    for raw_line in text.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            total_lines += 1;
+            continue;
+        }
+        let mut current_len = 0usize;
+        let mut line_count = 1u16;
+        for word in trimmed.split_whitespace() {
+            let w_len = word.chars().count();
+            if current_len == 0 {
+                if w_len > max_w {
+                    line_count += (w_len.div_ceil(max_w) - 1) as u16;
+                    current_len = w_len % max_w;
+                    if current_len == 0 {
+                        current_len = max_w;
+                    }
+                } else {
+                    current_len = w_len;
+                }
+            } else if current_len + 1 + w_len <= max_w {
+                current_len += 1 + w_len;
+            } else {
+                line_count += 1;
+                if w_len > max_w {
+                    line_count += (w_len.div_ceil(max_w) - 1) as u16;
+                    current_len = w_len % max_w;
+                    if current_len == 0 {
+                        current_len = max_w;
+                    }
+                } else {
+                    current_len = w_len;
+                }
+            }
+        }
+        total_lines += line_count;
+    }
+    total_lines.max(1)
 }
 
 /// RAII guard that ensures the terminal is restored on exit or panic unwinding.
@@ -477,6 +688,12 @@ fn run_event_loop(
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.cycle_difficulty();
                     }
+                    KeyCode::Char('c') | KeyCode::Char('C')
+                        if app.game.mode() == GameMode::Wordle
+                            && matches!(app.game.status(), GameStatus::Won | GameStatus::Lost) =>
+                    {
+                        app.copy_wordle_summary();
+                    }
                     _ => match app.focus {
                         FocusPanel::Guess => match key.code {
                             KeyCode::Enter => {
@@ -532,9 +749,13 @@ fn run_event_loop(
 }
 
 fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
+    let mode = app.game.mode();
+    let mode_title = format!(" {} ", mode.title());
+
     if f.area().width < MIN_RECOMMENDED_WIDTH {
         app.guess_area = Rect::default();
         app.scratch_area = Rect::default();
+        app.status_area = Rect::default();
         app.footer_buttons = [Rect::default(); 7];
 
         let warning_lines = vec![
@@ -551,7 +772,10 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
                 f.area().width,
                 MIN_RECOMMENDED_WIDTH
             )),
-            Line::from("Please widen your terminal window, or run `jotto --plain`."),
+            Line::from(format!(
+                "Please widen your terminal window, or run `{} --plain`.",
+                mode.command_name()
+            )),
             Line::from(""),
             Line::from(Span::styled(
                 "Press [Esc] or [Ctrl+C] to quit.",
@@ -564,7 +788,7 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" JOTTO ")
+                    .title(mode_title)
                     .border_style(Style::default().fg(COLOR_WARNING)),
             );
         f.render_widget(warning, f.area());
@@ -633,9 +857,9 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
         .split(f.area());
 
     // Header
-    let pool_count = dict::word_count(app.game.difficulty().scowl_size());
+    let pool_count = dict::word_count(mode, app.game.difficulty().scowl_size());
     let mut header_spans = vec![Span::styled(
-        " JOTTO ",
+        mode_title,
         Style::default()
             .fg(Color::Black)
             .bg(COLOR_ACCENT)
@@ -651,6 +875,14 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    let counter_label = match mode {
+        GameMode::Jotto => "  |  Rounds: ",
+        GameMode::Wordle => "  |  Guesses: ",
+    };
+    let counter_val = match mode {
+        GameMode::Jotto => app.game.history().len().to_string(),
+        GameMode::Wordle => format!("{}/{}", app.game.history().len(), MAX_WORDLE_GUESSES),
+    };
     header_spans.extend([
         Span::raw("  Difficulty: "),
         Span::styled(
@@ -659,9 +891,9 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
                 .fg(COLOR_ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  |  Rounds: "),
+        Span::raw(counter_label),
         Span::styled(
-            app.game.history().len().to_string(),
+            counter_val,
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
@@ -671,7 +903,7 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
         Paragraph::new(Line::from(header_spans)).block(Block::default().borders(Borders::ALL));
     f.render_widget(header, chunks[0]);
 
-    // Main split body (Left: Input + Used Letters + Scratch + Status, Right: History Table)
+    // Main split body (Left: Input + Used Letters [+ Scratch] + Status, Right: History / Wordle Board)
     let body_constraints = if f.area().width < 86 {
         [Constraint::Length(41), Constraint::Min(24)]
     } else {
@@ -682,23 +914,42 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
         .constraints(body_constraints)
         .split(chunks[1]);
 
-    let left_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Min(4),
-        ])
-        .split(body_chunks[0]);
+    let (guess_rect, used_rect, scratch_rect, status_rect) = match mode {
+        GameMode::Jotto => {
+            let lc = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Length(7),
+                    Constraint::Length(7),
+                    Constraint::Min(4),
+                ])
+                .split(body_chunks[0]);
+            (lc[0], lc[1], Some(lc[2]), lc[3])
+        }
+        GameMode::Wordle => {
+            let used_h = if body_chunks[0].height < 21 { 5 } else { 7 };
+            let lc = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Length(used_h),
+                    Constraint::Min(4),
+                ])
+                .split(body_chunks[0]);
+            (lc[0], lc[1], None, lc[2])
+        }
+    };
 
-    app.guess_area = left_chunks[0];
-    app.scratch_area = left_chunks[2];
+    app.guess_area = guess_rect;
+    app.scratch_area = scratch_rect.unwrap_or_default();
+    app.status_area = status_rect;
 
     // Guess Input Box
     let input_title = match app.game.status() {
         GameStatus::Playing => " Guess (5 letters) ",
         GameStatus::Won => " Game Won! Press [^N] for New Game ",
+        GameStatus::Lost => " Out of Guesses! Press [^N] for New Game ",
         GameStatus::GivenUp => " Game Over! Press [^N] for New Game ",
     };
     let guess_border_style = if app.focus == FocusPanel::Guess {
@@ -728,127 +979,174 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
             .title(input_title)
             .border_style(guess_border_style),
     );
-    f.render_widget(input_widget, left_chunks[0]);
+    f.render_widget(input_widget, guess_rect);
 
-    let used_cell_w = letter_cell_width(left_chunks[1].width.saturating_sub(2));
+    let used_cell_w = letter_cell_width(used_rect.width.saturating_sub(2));
     let used_pad = if used_cell_w == 4 { " " } else { "" };
 
-    // Used Letters Box
-    let used = app.game.used_letters();
+    // Used Letters Box (Jotto: binary used/unused; Wordle: Correct/Present/Absent with gray absent letters)
     let mut used_row1 = Vec::new();
     let mut used_row2 = Vec::new();
-    for (i, &is_used) in used.iter().enumerate() {
-        let ch = (b'A' + i as u8) as char;
-        let span = if is_used {
-            Span::styled(
-                format!("[{ch}]{used_pad}"),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(COLOR_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::styled(
-                format!(" {ch} {used_pad}"),
-                Style::default().fg(Color::DarkGray),
-            )
-        };
-        if i < 13 {
-            used_row1.push(span);
-        } else {
-            used_row2.push(span);
-        }
-    }
-    let used_lines = vec![
-        Line::from(""),
-        Line::from(used_row1),
-        Line::from(""),
-        Line::from(used_row2),
-    ];
-    let used_widget = Paragraph::new(used_lines)
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Used Letters "),
-        );
-    f.render_widget(used_widget, left_chunks[1]);
-
-    // Scratch Box (3 colorblind-safe states: Default -> ScratchedOut -> Positive)
-    let scratch_cell_w = letter_cell_width(left_chunks[2].width.saturating_sub(2));
-    let scratch_pad = if scratch_cell_w == 4 { " " } else { "" };
-    let scratched = app.game.scratched_letters();
-    let mut scratch_row1 = Vec::new();
-    let mut scratch_row2 = Vec::new();
-    for (i, &state) in scratched.iter().enumerate() {
-        let ch = (b'A' + i as u8) as char;
-        let is_cursor = app.focus == FocusPanel::Scratch && app.scratch_cursor == i;
-        let (label, mut style) = match state {
-            ScratchState::Default => {
-                if is_cursor {
-                    (
-                        format!("[{ch}]{scratch_pad}"),
+    match mode {
+        GameMode::Jotto => {
+            let used = app.game.used_letters();
+            for (i, &is_used) in used.iter().enumerate() {
+                let ch = (b'A' + i as u8) as char;
+                let span = if is_used {
+                    Span::styled(
+                        format!("[{ch}]{used_pad}"),
                         Style::default()
-                            .fg(COLOR_ACCENT)
-                            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                            .fg(Color::Black)
+                            .bg(COLOR_ACCENT)
+                            .add_modifier(Modifier::BOLD),
                     )
                 } else {
-                    (
-                        format!(" {ch} {scratch_pad}"),
-                        Style::default().fg(Color::Gray),
+                    Span::styled(
+                        format!(" {ch} {used_pad}"),
+                        Style::default().fg(Color::DarkGray),
                     )
+                };
+                if i < 13 {
+                    used_row1.push(span);
+                } else {
+                    used_row2.push(span);
                 }
             }
-            ScratchState::ScratchedOut => (
-                format!("~{ch}~{scratch_pad}"),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(COLOR_NEGATIVE)
-                    .add_modifier(Modifier::BOLD | Modifier::CROSSED_OUT),
-            ),
-            ScratchState::Positive => (
-                format!("+{ch}+{scratch_pad}"),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(COLOR_POSITIVE)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        };
-        if is_cursor {
-            style = style.add_modifier(Modifier::UNDERLINED);
         }
-        let span = Span::styled(label, style);
-        if i < 13 {
-            scratch_row1.push(span);
-        } else {
-            scratch_row2.push(span);
+        GameMode::Wordle => {
+            let states = app.game.letter_states();
+            for (i, &state) in states.iter().enumerate() {
+                let ch = (b'A' + i as u8) as char;
+                let span = match state {
+                    Some(LetterState::Correct) => Span::styled(
+                        format!("+{ch}+{used_pad}"),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(COLOR_POSITIVE)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Some(LetterState::Present) => Span::styled(
+                        format!("?{ch}?{used_pad}"),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(COLOR_WARNING)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Some(LetterState::Absent) => Span::styled(
+                        format!("~{ch}~{used_pad}"),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::CROSSED_OUT),
+                    ),
+                    None => Span::styled(
+                        format!(" {ch} {used_pad}"),
+                        Style::default().fg(Color::Gray),
+                    ),
+                };
+                if i < 13 {
+                    used_row1.push(span);
+                } else {
+                    used_row2.push(span);
+                }
+            }
         }
     }
-    let scratch_lines = vec![
-        Line::from(""),
-        Line::from(scratch_row1),
-        Line::from(""),
-        Line::from(scratch_row2),
-    ];
-    let scratch_border_style = if app.focus == FocusPanel::Scratch {
-        Style::default().fg(COLOR_ACCENT)
+    let used_lines = if used_rect.height < 7 {
+        vec![Line::from(used_row1), Line::from(""), Line::from(used_row2)]
     } else {
-        Style::default()
+        vec![
+            Line::from(""),
+            Line::from(used_row1),
+            Line::from(""),
+            Line::from(used_row2),
+        ]
     };
-    let scratch_title = if left_chunks[2].width >= 52 {
-        " Scratch (Click or [Tab] + type/Space to toggle) "
-    } else {
-        " Scratch (Click or [Tab] to toggle) "
+    let used_title = match mode {
+        GameMode::Jotto => " Used Letters ",
+        GameMode::Wordle => " Used Letters (+exact ?present ~absent) ",
     };
-    let scratch_widget = Paragraph::new(scratch_lines)
+    let used_widget = Paragraph::new(used_lines)
         .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(scratch_title)
-                .border_style(scratch_border_style),
-        );
-    f.render_widget(scratch_widget, left_chunks[2]);
+        .block(Block::default().borders(Borders::ALL).title(used_title));
+    f.render_widget(used_widget, used_rect);
+
+    // Scratch Box (Jotto only: 3 colorblind-safe states: Default -> ScratchedOut -> Positive)
+    if let Some(s_rect) = scratch_rect {
+        let scratch_cell_w = letter_cell_width(s_rect.width.saturating_sub(2));
+        let scratch_pad = if scratch_cell_w == 4 { " " } else { "" };
+        let scratched = app.game.scratched_letters();
+        let mut scratch_row1 = Vec::new();
+        let mut scratch_row2 = Vec::new();
+        for (i, &state) in scratched.iter().enumerate() {
+            let ch = (b'A' + i as u8) as char;
+            let is_cursor = app.focus == FocusPanel::Scratch && app.scratch_cursor == i;
+            let (label, mut style) = match state {
+                ScratchState::Default => {
+                    if is_cursor {
+                        (
+                            format!("[{ch}]{scratch_pad}"),
+                            Style::default()
+                                .fg(COLOR_ACCENT)
+                                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                        )
+                    } else {
+                        (
+                            format!(" {ch} {scratch_pad}"),
+                            Style::default().fg(Color::Gray),
+                        )
+                    }
+                }
+                ScratchState::ScratchedOut => (
+                    format!("~{ch}~{scratch_pad}"),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(COLOR_NEGATIVE)
+                        .add_modifier(Modifier::BOLD | Modifier::CROSSED_OUT),
+                ),
+                ScratchState::Positive => (
+                    format!("+{ch}+{scratch_pad}"),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(COLOR_POSITIVE)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            };
+            if is_cursor {
+                style = style.add_modifier(Modifier::UNDERLINED);
+            }
+            let span = Span::styled(label, style);
+            if i < 13 {
+                scratch_row1.push(span);
+            } else {
+                scratch_row2.push(span);
+            }
+        }
+        let scratch_lines = vec![
+            Line::from(""),
+            Line::from(scratch_row1),
+            Line::from(""),
+            Line::from(scratch_row2),
+        ];
+        let scratch_border_style = if app.focus == FocusPanel::Scratch {
+            Style::default().fg(COLOR_ACCENT)
+        } else {
+            Style::default()
+        };
+        let scratch_title = if s_rect.width >= 52 {
+            " Scratch (Click or [Tab] + type/Space to toggle) "
+        } else {
+            " Scratch (Click or [Tab] to toggle) "
+        };
+        let scratch_widget = Paragraph::new(scratch_lines)
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(scratch_title)
+                    .border_style(scratch_border_style),
+            );
+        f.render_widget(scratch_widget, s_rect);
+    }
 
     // Status / Message Box
     let (msg_text, msg_color) = app
@@ -860,54 +1158,223 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
         .lines()
         .map(|line| Line::from(Span::styled(line, Style::default().fg(msg_color))))
         .collect();
-    let status_widget = Paragraph::new(status_lines)
-        .wrap(Wrap { trim: true })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Status ")
-                .border_style(Style::default().fg(Color::White)),
-        );
-    f.render_widget(status_widget, left_chunks[3]);
 
-    // History Table (newest rounds first, matching original Shiny app)
-    let header_cells = ["Round", "Guess", "Common"].iter().map(|h| {
-        Cell::from(*h).style(
-            Style::default()
-                .fg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        )
-    });
-    let table_header = Row::new(header_cells).height(1).bottom_margin(1);
+    let show_wordle_summary = mode == GameMode::Wordle
+        && matches!(app.game.status(), GameStatus::Won | GameStatus::Lost)
+        && !app.game.history().is_empty();
 
-    let rows = app.game.history().iter().rev().map(|r| {
-        let common_style = if r.common == 5 {
-            Style::default()
-                .fg(COLOR_POSITIVE)
-                .add_modifier(Modifier::BOLD)
+    let status_title = if show_wordle_summary {
+        " Status (Click or [C] to Copy) "
+    } else {
+        " Status "
+    };
+    let status_block = Block::default()
+        .borders(Borders::ALL)
+        .title(status_title)
+        .border_style(Style::default().fg(Color::White));
+
+    if show_wordle_summary {
+        let status_inner = status_block.inner(status_rect);
+        f.render_widget(status_block, status_rect);
+
+        let mut summary_lines = Vec::with_capacity(app.game.history().len() + 1);
+        for r in app.game.history() {
+            let mut spans = Vec::with_capacity(9);
+            for (idx, &state) in r.letter_states.iter().enumerate() {
+                if idx > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                let tile = match state {
+                    LetterState::Correct => Span::styled(
+                        " + ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(COLOR_POSITIVE)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    LetterState::Present => Span::styled(
+                        " ? ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(COLOR_WARNING)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    LetterState::Absent => Span::styled(
+                        " ~ ",
+                        Style::default()
+                            .fg(Color::Gray)
+                            .bg(Color::DarkGray)
+                            .add_modifier(Modifier::CROSSED_OUT),
+                    ),
+                };
+                spans.push(tile);
+            }
+            summary_lines.push(Line::from(spans));
+        }
+
+        let msg_h = wrapped_line_count(msg_text, status_inner.width);
+        let history_h = app.game.history().len() as u16;
+
+        if status_inner.height >= msg_h + history_h {
+            let status_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(msg_h), Constraint::Min(1)])
+                .split(status_inner);
+
+            let msg_widget = Paragraph::new(status_lines).wrap(Wrap { trim: true });
+            f.render_widget(msg_widget, status_chunks[0]);
+
+            if status_chunks[1].height > history_h {
+                summary_lines.insert(0, Line::from(""));
+            }
+            let summary_widget = Paragraph::new(summary_lines).alignment(Alignment::Center);
+            f.render_widget(summary_widget, status_chunks[1]);
         } else {
-            Style::default().fg(Color::White)
-        };
-        Row::new(vec![
-            Cell::from(r.round.to_string()),
-            Cell::from(r.guess.to_ascii_uppercase()),
-            Cell::from(r.common.to_string()).style(common_style),
-        ])
-    });
+            let status_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(15), Constraint::Length(21)])
+                .split(status_inner);
 
-    let history_table = Table::new(
-        rows,
-        [
-            Constraint::Percentage(25),
-            Constraint::Percentage(45),
-            Constraint::Percentage(30),
-        ],
-    )
-    .header(table_header)
-    .block(Block::default().borders(Borders::ALL).title(" History "))
-    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+            let msg_widget = Paragraph::new(status_lines).wrap(Wrap { trim: true });
+            f.render_widget(msg_widget, status_chunks[0]);
 
-    f.render_stateful_widget(history_table, body_chunks[1], &mut app.table_state);
+            let summary_widget = Paragraph::new(summary_lines).alignment(Alignment::Center);
+            f.render_widget(summary_widget, status_chunks[1]);
+        }
+    } else {
+        let status_widget = Paragraph::new(status_lines)
+            .wrap(Wrap { trim: true })
+            .block(status_block);
+        f.render_widget(status_widget, status_rect);
+    }
+
+    // Right Panel: History Table (Jotto) or 6-Guess Board (Wordle)
+    match mode {
+        GameMode::Jotto => {
+            let header_cells = ["Round", "Guess", "Common"].iter().map(|h| {
+                Cell::from(*h).style(
+                    Style::default()
+                        .fg(COLOR_ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                )
+            });
+            let table_header = Row::new(header_cells).height(1).bottom_margin(1);
+
+            let rows = app.game.history().iter().rev().map(|r| {
+                let common_style = if r.common == 5 {
+                    Style::default()
+                        .fg(COLOR_POSITIVE)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                Row::new(vec![
+                    Cell::from(r.round.to_string()),
+                    Cell::from(r.guess.to_ascii_uppercase()),
+                    Cell::from(r.common.to_string()).style(common_style),
+                ])
+            });
+
+            let history_table = Table::new(
+                rows,
+                [
+                    Constraint::Percentage(25),
+                    Constraint::Percentage(45),
+                    Constraint::Percentage(30),
+                ],
+            )
+            .header(table_header)
+            .block(Block::default().borders(Borders::ALL).title(" History "))
+            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+            f.render_stateful_widget(history_table, body_chunks[1], &mut app.table_state);
+        }
+        GameMode::Wordle => {
+            let row_margin = if body_chunks[1].height >= 16 { 1 } else { 0 };
+            let header_cells = ["Guess", "Board"].iter().map(|h| {
+                Cell::from(*h).style(
+                    Style::default()
+                        .fg(COLOR_ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                )
+            });
+            let table_header = Row::new(header_cells).height(1).bottom_margin(row_margin);
+
+            let mut rows = Vec::with_capacity(MAX_WORDLE_GUESSES);
+            for slot in 0..MAX_WORDLE_GUESSES {
+                if let Some(r) = app.game.history().get(slot) {
+                    let mut spans = Vec::with_capacity(9);
+                    for (idx, (ch, &state)) in r
+                        .guess
+                        .chars()
+                        .map(|c| c.to_ascii_uppercase())
+                        .zip(r.letter_states.iter())
+                        .enumerate()
+                    {
+                        if idx > 0 {
+                            spans.push(Span::raw(" "));
+                        }
+                        let span = match state {
+                            LetterState::Correct => Span::styled(
+                                format!("+{ch}+"),
+                                Style::default()
+                                    .fg(Color::Black)
+                                    .bg(COLOR_POSITIVE)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            LetterState::Present => Span::styled(
+                                format!("?{ch}?"),
+                                Style::default()
+                                    .fg(Color::Black)
+                                    .bg(COLOR_WARNING)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            LetterState::Absent => Span::styled(
+                                format!("~{ch}~"),
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::CROSSED_OUT),
+                            ),
+                        };
+                        spans.push(span);
+                    }
+                    rows.push(
+                        Row::new(vec![
+                            Cell::from(format!("{}/{}", r.round, MAX_WORDLE_GUESSES)),
+                            Cell::from(Line::from(spans)),
+                        ])
+                        .bottom_margin(row_margin),
+                    );
+                } else {
+                    rows.push(
+                        Row::new(vec![
+                            Cell::from(format!("{}/{}", slot + 1, MAX_WORDLE_GUESSES))
+                                .style(Style::default().fg(Color::DarkGray)),
+                            Cell::from(Line::from(Span::styled(
+                                " ·   ·   ·   ·   · ",
+                                Style::default().fg(Color::DarkGray),
+                            ))),
+                        ])
+                        .bottom_margin(row_margin),
+                    );
+                }
+            }
+
+            let board_table = Table::new(
+                rows,
+                [Constraint::Percentage(25), Constraint::Percentage(75)],
+            )
+            .header(table_header)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Guesses (6 max) "),
+            )
+            .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
+
+            f.render_stateful_widget(board_table, body_chunks[1], &mut app.table_state);
+        }
+    }
 
     // Clickable Footer Buttons
     let button_areas: [Rect; 7] = if !stack_needs_wrap {
@@ -967,21 +1434,53 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
     if app.show_help {
         let area = centered_rect(74, 80, f.area());
         f.render_widget(Clear, area);
-        let help_text = vec![
-            Line::from(Span::styled(
-                "How to Play Jotto",
-                Style::default()
-                    .fg(COLOR_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from("Jotto is a game where you try to guess the five-letter secret word:"),
-            Line::from("  • The secret word has 5 unique letters (no repeating letters)."),
-            Line::from("  • The word is not a proper noun."),
-            Line::from("  • After each guess, you are told how many letters your guess shares"),
-            Line::from("    in common with the secret word (regardless of position)."),
-            Line::from("  • Scratch: Click letters, or [Tab] then type/Space to toggle states."),
-            Line::from("  • Daily Mode ([^T] or --daily): Deterministic UTC daily word challenge."),
+        let easy_n = dict::word_count(mode, crate::game::Difficulty::Easy.scowl_size());
+        let med_n = dict::word_count(mode, crate::game::Difficulty::Medium.scowl_size());
+        let hard_n = dict::word_count(mode, crate::game::Difficulty::Hard.scowl_size());
+        let scrab_n = dict::word_count(mode, crate::game::Difficulty::Scrabble.scowl_size());
+        let insane_n = dict::word_count(mode, crate::game::Difficulty::Insane.scowl_size());
+
+        let mut help_text = match mode {
+            GameMode::Jotto => vec![
+                Line::from(Span::styled(
+                    "How to Play Jotto",
+                    Style::default()
+                        .fg(COLOR_ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from("Jotto is a game where you try to guess the five-letter secret word:"),
+                Line::from("  • The secret word has 5 unique letters (no repeating letters)."),
+                Line::from("  • The word is not a proper noun."),
+                Line::from("  • After each guess, you are told how many letters your guess shares"),
+                Line::from("    in common with the secret word (regardless of position)."),
+                Line::from(
+                    "  • Scratch: Click letters, or [Tab] then type/Space to toggle states.",
+                ),
+                Line::from(
+                    "  • Daily Mode ([^T] or --daily): Deterministic UTC daily word challenge.",
+                ),
+            ],
+            GameMode::Wordle => vec![
+                Line::from(Span::styled(
+                    "How to Play Wordle",
+                    Style::default()
+                        .fg(COLOR_ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from("Wordle is a game where you have 6 guesses to find the 5-letter word:"),
+                Line::from("  • Repeating letters are allowed; the word is not a proper noun."),
+                Line::from("  • +X+ (Green): Letter is in the word and in the exact spot."),
+                Line::from("  • ?X? (Orange): Letter is in the word, but in a different spot."),
+                Line::from("  • ~X~ (Gray/Crossed): Letter is not in the word in any spot."),
+                Line::from(
+                    "  • Daily Mode ([^T] or --daily): Deterministic UTC daily word challenge.",
+                ),
+            ],
+        };
+
+        help_text.extend([
             Line::from(""),
             Line::from(Span::styled(
                 "Difficulty Levels (SCOWL)",
@@ -989,11 +1488,21 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
                     .fg(COLOR_ACCENT)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from("  • Easy (35): Recommended small dictionary (~2,400 words)."),
-            Line::from("  • Medium (50): Recommended medium dictionary (~3,100 words)."),
-            Line::from("  • Hard (70): Recommended large dictionary (~4,700 words)."),
-            Line::from("  • Scrabble (80): Strange & unusual word-game words (~5,700 words)."),
-            Line::from("  • 🤷 Insane (95): Every valid 5-letter English word (~7,400 words)."),
+            Line::from(format!(
+                "  • Easy (35): Recommended small dictionary ({easy_n} words)."
+            )),
+            Line::from(format!(
+                "  • Medium (50): Recommended medium dictionary ({med_n} words)."
+            )),
+            Line::from(format!(
+                "  • Hard (70): Recommended large dictionary ({hard_n} words)."
+            )),
+            Line::from(format!(
+                "  • Scrabble (80): Strange & unusual word-game words ({scrab_n} words)."
+            )),
+            Line::from(format!(
+                "  • 🤷 Insane (95): Every valid 5-letter English word ({insane_n} words)."
+            )),
             Line::from(""),
             Line::from(Span::styled(
                 "Credits",
@@ -1008,7 +1517,8 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
                 "Click anywhere or press [Esc] / [Enter] to close",
                 Style::default().fg(Color::DarkGray),
             )),
-        ];
+        ]);
+
         let modal = Paragraph::new(help_text).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::ALL)

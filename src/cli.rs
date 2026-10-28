@@ -1,8 +1,8 @@
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 
-use crate::game::Difficulty;
+use crate::game::{Difficulty, GameMode};
 
-/// A CLI version of the classic Jotto 5-letter word game.
+/// A CLI version of the classic Jotto and Wordle 5-letter word games.
 #[derive(Debug, Parser)]
 #[command(name = "jotto", version, about, long_about = None)]
 pub struct CliArgs {
@@ -21,4 +21,17 @@ pub struct CliArgs {
     /// Optional custom 5-letter secret word (for testing or custom games)
     #[arg(short, long)]
     pub word: Option<String>,
+}
+
+impl CliArgs {
+    /// Parses CLI arguments configured for the given `GameMode` (`jotto` or `wordle`).
+    pub fn parse_for_mode(mode: GameMode) -> Self {
+        let about = match mode {
+            GameMode::Jotto => "A CLI version of the classic Jotto 5-letter word game.",
+            GameMode::Wordle => "A CLI version of the classic Wordle 5-letter word game.",
+        };
+        let cmd = Self::command().name(mode.command_name()).about(about);
+        let matches = cmd.get_matches();
+        Self::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+    }
 }

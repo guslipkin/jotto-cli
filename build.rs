@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SCOWL_REPO_URL: &str = "https://github.com/en-wl/wordlist.git";
-const BUILD_FORMAT_VERSION: &str = "v2-pure-r1";
+const BUILD_FORMAT_VERSION: &str = "v2-pure-r2-all5";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -130,11 +130,12 @@ conn.close()
 count = 0
 with open(out_bin, "wb") as f:
     for word, diff in rows:
-        if len(word) == 5 and len(set(word)) == 5 and word.isascii() and word.isalpha() and word.islower():
+        if len(word) == 5 and word.isascii() and word.isalpha() and word.islower():
             b = word.encode("ascii")
-            d = min(max(int(diff), 1), 255)
+            d = min(max(int(diff), 1), 127)
+            unique_flag = 0x80 if len(set(word)) == 5 else 0x00
             f.write(b)
-            f.write(bytes([d]))
+            f.write(bytes([d | unique_flag]))
             count += 1
 
 if count < 1000:
@@ -161,15 +162,13 @@ if count < 1000:
     false
 }
 
-fn has_five_unique_lowercase_ascii(word: &str) -> bool {
-    if word.len() != 5 {
-        return false;
-    }
+fn is_five_lowercase_ascii(word: &str) -> bool {
+    word.len() == 5 && word.bytes().all(|b| b.is_ascii_lowercase())
+}
+
+fn has_unique_bytes(word: &[u8; 5]) -> bool {
     let mut mask: u32 = 0;
-    for &b in word.as_bytes() {
-        if !b.is_ascii_lowercase() {
-            return false;
-        }
+    for &b in word {
         let bit = 1u32 << (b - b'a');
         if (mask & bit) != 0 {
             return false;
@@ -249,7 +248,7 @@ fn build_with_rust_fallback(wordlist_dir: &Path, words_bin_path: &Path) {
                     _ => false,
                 });
 
-                if has_five_unique_lowercase_ascii(trimmed) {
+                if is_five_lowercase_ascii(trimmed) {
                     let mut arr = [0u8; 5];
                     arr.copy_from_slice(trimmed.as_bytes());
                     words
@@ -263,8 +262,10 @@ fn build_with_rust_fallback(wordlist_dir: &Path, words_bin_path: &Path) {
 
     let mut file = fs::File::create(words_bin_path).expect("Failed to create words.bin");
     for (word, diff) in &words {
+        let unique_flag = if has_unique_bytes(word) { 0x80 } else { 0x00 };
+        let packed = (*diff & 0x7F) | unique_flag;
         file.write_all(word).expect("Failed to write word");
-        file.write_all(&[*diff])
+        file.write_all(&[packed])
             .expect("Failed to write difficulty");
     }
 }
