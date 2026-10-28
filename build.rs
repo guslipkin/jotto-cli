@@ -143,6 +143,7 @@ if count < 1000:
 
     for python_cmd in ["python3", "python"] {
         let status = Command::new(python_cmd)
+            .env("PYTHONUTF8", "1")
             .args([
                 "-c",
                 py_script,
