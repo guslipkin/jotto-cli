@@ -2,15 +2,18 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Embedded 6-byte records: 5-byte ASCII lowercase word + 1-byte packed metadata.
-/// Bits 0..=6 (`& 0x7F`): SCOWL difficulty (`1..=95`).
-/// Bit 7 (`& 0x80`): `1` if all 5 letters are unique (Jotto-eligible), `0` if letters repeat.
+/// Embedded 7-byte records: 5-byte ASCII lowercase word + 1-byte packed metadata + 1 flags byte.
+/// Byte 5, bits 0..=6 (`& 0x7F`): SCOWL difficulty (`1..=95`).
+/// Byte 5, bit 7 (`& 0x80`): `1` if all 5 letters are unique (Jotto-eligible), `0` if letters repeat.
+/// Byte 6, bit 0 (`& 0x01`): `1` if the word is a plural or -s verb form, which Wordle
+/// accepts as a guess but, like the original, never uses as its answer.
 /// Sorted lexicographically by the 5-byte word.
 static WORDS_DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/words.bin"));
 
-const RECORD_SIZE: usize = 6;
+const RECORD_SIZE: usize = 7;
 const DIFF_MASK: u8 = 0x7F;
 const UNIQUE_FLAG: u8 = 0x80;
+const PLURAL_FLAG: u8 = 0x01;
 
 /// Fixed UTC epoch day (2024-01-01 UTC = 19,723 days since 1970-01-01) for daily cooldown tracking.
 pub const DAILY_EPOCH_DAY: u64 = 19_723;
@@ -64,6 +67,13 @@ fn chunk_matches_mode(chunk: &[u8; RECORD_SIZE], mode: GameMode) -> bool {
     !mode.requires_unique_letters() || (chunk[5] & UNIQUE_FLAG) != 0
 }
 
+/// Whether a record can be `mode`'s secret word: any guessable word in Jotto, and
+/// anything but a plural or -s form in Wordle.
+#[inline(always)]
+fn chunk_is_answer(chunk: &[u8; RECORD_SIZE], mode: GameMode) -> bool {
+    chunk_matches_mode(chunk, mode) && !(mode == GameMode::Wordle && chunk[6] & PLURAL_FLAG != 0)
+}
+
 #[inline(always)]
 fn chunk_difficulty(chunk: &[u8; RECORD_SIZE]) -> u8 {
     chunk[5] & DIFF_MASK
@@ -110,19 +120,18 @@ pub fn word_difficulty(mode: GameMode, word: &str) -> Option<u8> {
     None
 }
 
-/// Returns the number of dictionary words for `mode` with `difficulty <= max_difficulty`.
+/// Returns the number of possible secret words for `mode` with `difficulty <= max_difficulty`
+/// (in Wordle, plurals and -s forms are guessable but never the answer, so aren't counted).
 pub fn word_count(mode: GameMode, max_difficulty: u8) -> usize {
     WORDS_DATA
         .as_chunks::<RECORD_SIZE>()
         .0
         .iter()
-        .filter(|chunk| {
-            chunk_matches_mode(chunk, mode) && chunk_difficulty(chunk) <= max_difficulty
-        })
+        .filter(|chunk| chunk_is_answer(chunk, mode) && chunk_difficulty(chunk) <= max_difficulty)
         .count()
 }
 
-/// Picks a random 5-letter word from the dictionary for `mode` with `difficulty <= max_difficulty`,
+/// Picks a random secret word for `mode` with `difficulty <= max_difficulty`,
 /// avoiding any word in `excluded` until the entire pool for `(mode, max_difficulty)` has been exhausted.
 /// Returns `(word, recycled)` where `recycled` is `true` if `excluded` had exhausted the pool.
 pub fn random_word_excluding(
@@ -134,9 +143,7 @@ pub fn random_word_excluding(
         .as_chunks::<RECORD_SIZE>()
         .0
         .iter()
-        .filter(|chunk| {
-            chunk_matches_mode(chunk, mode) && chunk_difficulty(chunk) <= max_difficulty
-        });
+        .filter(|chunk| chunk_is_answer(chunk, mode) && chunk_difficulty(chunk) <= max_difficulty);
 
     let unplayed_count = eligible
         .clone()
@@ -203,7 +210,7 @@ pub fn format_utc_date(days_since_epoch: u64) -> String {
 }
 
 /// Returns the daily cooldown length (in UTC days) for `mode` — 90% of the Scrabble (`80`) pool
-/// (~5,191 days / 14.2 years for Jotto; ~8,028 days / 22.0 years for Wordle).
+/// (well over a decade for each game; the exact length follows the current SCOWL list).
 pub fn daily_cooldown_days(mode: GameMode) -> u64 {
     let pool = word_count(mode, DAILY_DIFFICULTY_SIZE);
     ((pool * 9) / 10).max(1) as u64
@@ -226,7 +233,7 @@ pub fn daily_word_for_day(mode: GameMode, utc_day: u64) -> &'static str {
     let mut total_candidates = 0usize;
 
     for chunk in WORDS_DATA.as_chunks::<RECORD_SIZE>().0 {
-        if chunk_matches_mode(chunk, mode) && chunk_difficulty(chunk) <= DAILY_DIFFICULTY_SIZE {
+        if chunk_is_answer(chunk, mode) && chunk_difficulty(chunk) <= DAILY_DIFFICULTY_SIZE {
             let bytes: &[u8; 5] = chunk[..5].try_into().expect("5-byte word");
             let key = pack_word_u64(bytes);
             let bucket_idx = (hash_word_bucket(key) as usize) % NUM_BUCKETS;

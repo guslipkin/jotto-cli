@@ -1502,7 +1502,9 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
                 )),
                 Line::from(""),
                 Line::from("Wordle is a game where you have 6 guesses to find the 5-letter word:"),
-                Line::from("  • Repeating letters are allowed; the word is not a proper noun."),
+                Line::from(
+                    "  • Repeating letters are allowed; the word is not a proper noun or plural.",
+                ),
                 Line::from(vec![
                     Span::raw("  • "),
                     Span::styled(

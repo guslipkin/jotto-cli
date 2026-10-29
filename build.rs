@@ -1,12 +1,15 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Bytes per words.bin record: the word, its packed difficulty, and its flags.
+const RECORD_SIZE: usize = 7;
+
 const SCOWL_REPO_URL: &str = "https://github.com/en-wl/wordlist.git";
-const BUILD_FORMAT_VERSION: &str = "v2-pure-r2-all5";
+const BUILD_FORMAT_VERSION: &str = "v3-plural-flag";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -115,6 +118,30 @@ subprocess.run(
 )
 
 conn = sqlite3.connect(db_path)
+
+# Plurals and -s verb forms (Wordle never uses one as its answer): words SCOWL
+# lists only as an -s form, plus words ending in -s/-es (not -ss/-us/-is) whose
+# stem is a 3-4 letter noun or verb, since some plurals ("costs") also carry a
+# stray noun entry from one of SCOWL's source lists.
+inflected_poses = ('ns', 'vs', 'ms', 'nss', 'np', 'nsp', 'nssp', '?', 'x', '')
+base_words = {w for (w,) in conn.execute(
+    f"SELECT DISTINCT word FROM scowl_v0 WHERE pos NOT IN ({','.join('?' * len(inflected_poses))})",
+    inflected_poses,
+)}
+s_forms = {w for (w,) in conn.execute(
+    "SELECT DISTINCT word FROM scowl_v0 WHERE pos IN ('ns', 'vs', 'ms', 'nss')"
+)}
+stems = {w for (w,) in conn.execute(
+    "SELECT DISTINCT word FROM scowl_v0 WHERE pos IN ('n0', 'v0', 'm0') AND length(word) IN (3, 4)"
+)}
+
+def is_s_form(w):
+    if w in s_forms and w not in base_words:
+        return True
+    if w.endswith('s') and not w.endswith(('ss', 'us', 'is')):
+        return w[:-1] in stems or (w.endswith('es') and w[:-2] in stems)
+    return False
+
 rows = conn.execute("""
     SELECT word, MIN(size) as difficulty
     FROM scowl_v0
@@ -135,7 +162,7 @@ with open(out_bin, "wb") as f:
             d = min(max(int(diff), 1), 127)
             unique_flag = 0x80 if len(set(word)) == 5 else 0x00
             f.write(b)
-            f.write(bytes([d | unique_flag]))
+            f.write(bytes([d | unique_flag, 0x01 if is_s_form(word) else 0x00]))
             count += 1
 
 if count < 1000:
@@ -191,6 +218,8 @@ fn build_with_rust_fallback(wordlist_dir: &Path, words_bin_path: &Path) {
     ];
 
     let mut words: BTreeMap<[u8; 5], u8> = BTreeMap::new();
+    // 3- and 4-letter words, as stems for spotting plurals without SCOWL's parts of speech.
+    let mut stems: HashSet<String> = HashSet::new();
 
     for file_name in files {
         let path = data_dir.join(file_name);
@@ -248,6 +277,11 @@ fn build_with_rust_fallback(wordlist_dir: &Path, words_bin_path: &Path) {
                     _ => false,
                 });
 
+                if (3..=4).contains(&trimmed.len())
+                    && trimmed.bytes().all(|b| b.is_ascii_lowercase())
+                {
+                    stems.insert(trimmed.to_string());
+                }
                 if is_five_lowercase_ascii(trimmed) {
                     let mut arr = [0u8; 5];
                     arr.copy_from_slice(trimmed.as_bytes());
@@ -265,19 +299,33 @@ fn build_with_rust_fallback(wordlist_dir: &Path, words_bin_path: &Path) {
         let unique_flag = if has_unique_bytes(word) { 0x80 } else { 0x00 };
         let packed = (*diff & 0x7F) | unique_flag;
         file.write_all(word).expect("Failed to write word");
-        file.write_all(&[packed])
+        let w = std::str::from_utf8(word).expect("ASCII word");
+        let flags = if looks_plural(w, &stems) { 0x01 } else { 0x00 };
+        file.write_all(&[packed, flags])
             .expect("Failed to write difficulty");
     }
+}
+
+/// The suffix half of the Python build's plural test: ends in -s/-es (not
+/// -ss/-us/-is) after a known 3-4 letter stem. Without SCOWL's parts of speech this
+/// also catches some -s verb forms, which Wordle doesn't use as answers either.
+fn looks_plural(word: &str, stems: &HashSet<String>) -> bool {
+    if !word.ends_with('s') || word.ends_with("ss") || word.ends_with("us") || word.ends_with("is")
+    {
+        return false;
+    }
+    stems.contains(&word[..word.len() - 1])
+        || (word.ends_with("es") && stems.contains(&word[..word.len() - 2]))
 }
 
 fn validate_words_bin(words_bin_path: &Path) {
     let bytes = fs::read(words_bin_path).expect("Failed to read generated words.bin");
     assert!(
-        !bytes.is_empty() && bytes.len().is_multiple_of(6),
-        "words.bin length ({}) must be a non-empty multiple of 6",
+        !bytes.is_empty() && bytes.len().is_multiple_of(RECORD_SIZE),
+        "words.bin length ({}) must be a non-empty multiple of {RECORD_SIZE}",
         bytes.len()
     );
-    let count = bytes.len() / 6;
+    let count = bytes.len() / RECORD_SIZE;
     assert!(
         count >= 1000,
         "Expected at least 1000 words in words.bin, found {count}"

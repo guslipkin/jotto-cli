@@ -18,6 +18,7 @@ Wordle gives you **6 guesses** to find the secret five-letter word:
   - `+X+` (Green): Letter is in the word and in the **exact position**.
   - `?X?` (Orange): Letter is in the word, but in a **different position**.
   - `~X~` (Gray / Crossed Out): Letter is **not in the word** (or is an excess duplicate).
+- Like the original, the answer is **never a plural** (or an -s verb form like "tells"), though plurals are fine as guesses.
 
 ## Features
 
@@ -25,7 +26,7 @@ Wordle gives you **6 guesses** to find the secret five-letter word:
   - **Full-screen Terminal UI (TUI)** by default with a live Guess box, Used Letters tracker (manual Scratch pad in Jotto; auto-colored letter states in Wordle), and History / 6-Guess Board.
   - **Plain / REPL Mode (`--plain`)** for line-by-line terminal sessions or non-TTY pipes.
 - **Minimal Word Recycling**:
-  - **Daily Mode (`--daily` or `Ctrl+T`)**: Uses a deterministic 90%-pool cooldown (~14.2 years for Jotto, ~22.0 years for Wordle) on the Scrabble (`80`) word list before any daily word can repeat.
+  - **Daily Mode (`--daily` or `Ctrl+T`)**: Uses a deterministic cooldown of 90% of the Scrabble (`80`) word list's size in days (well over a decade for both games) before any daily word can repeat.
   - **Random Mode**: Tracks dealt words across resets so a word never repeats in a session until the entire difficulty pool has been played.
 - **Fresh SCOWL Dictionary at Build Time**:
   - Pulls the latest word lists directly from [`en-wl/wordlist`](https://github.com/en-wl/wordlist) during `cargo build` via `build.rs` and embeds a single compact dictionary shared by both games.
@@ -98,12 +99,12 @@ All bottom bar buttons (**Guess**, **Help**, **New Game**, **Daily**, **Give Up*
 
 ## Difficulty Levels (SCOWL)
 
-Each difficulty setting includes all words from the levels before it:
-- **Easy (`35`)**: Recommended small dictionary (`2,443` Jotto words / `3,615` Wordle words).
-- **Medium (`50`)**: Recommended medium dictionary (`3,157` Jotto words / `4,722` Wordle words).
-- **Hard (`70`)**: Recommended large dictionary (`4,768` Jotto words / `7,309` Wordle words).
-- **Scrabble (`80`)**: Strange and unusual words used in word games like Scrabble (`5,768` Jotto words / `8,920` Wordle words, default).
-- **🤷 Insane (`95`)**: Every valid 5-letter English word in SCOWL (`7,463` Jotto words / `11,542` Wordle words).
+Each difficulty setting includes all words from the levels before it. The word lists come from the latest SCOWL at build time, so each level's exact count can change between builds; the in-game help (`?` or `:help`) shows the current ones.
+- **Easy (`35`)**: Recommended small dictionary.
+- **Medium (`50`)**: Recommended medium dictionary.
+- **Hard (`70`)**: Recommended large dictionary.
+- **Scrabble (`80`)**: Strange and unusual words used in word games like Scrabble (default).
+- **🤷 Insane (`95`)**: Every valid 5-letter English word in SCOWL. Wordle accepts every word in the list as a guess, plurals included, at any level.
 
 ## Credits & License
 
