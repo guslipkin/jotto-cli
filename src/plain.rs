@@ -416,5 +416,10 @@ fn print_credits(mode: GameMode) {
         mode.title()
     );
     println!("The word list comes from SCOWL (http://wordlist.aspell.net/).");
+    if mode == GameMode::Wordle {
+        println!(
+            "Wordle was created by Josh Wardle; play the original at https://www.nytimes.com/games/wordle"
+        );
+    }
     println!();
 }

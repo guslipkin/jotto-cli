@@ -1575,6 +1575,13 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
             )),
             Line::from("  • Created by Gus Lipkin (https://guslipkin.me)"),
             Line::from("  • Word list powered by SCOWL (http://wordlist.aspell.net/)"),
+        ]);
+        if mode == GameMode::Wordle {
+            help_text.push(Line::from(
+                "  • Wordle was created by Josh Wardle: https://www.nytimes.com/games/wordle",
+            ));
+        }
+        help_text.extend([
             Line::from(""),
             Line::from(Span::styled(
                 "Click anywhere or press [Esc] / [Enter] to close",

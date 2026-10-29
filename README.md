@@ -109,5 +109,6 @@ Each difficulty setting includes all words from the levels before it. The word l
 ## Credits & License
 
 - Written by [Gus Lipkin](https://guslipkin.me).
+- [Wordle](https://www.nytimes.com/games/wordle) was created by Josh Wardle and is now published by The New York Times; `wordle` is an unofficial version. Play the original at <https://www.nytimes.com/games/wordle>.
 - Word list from [SCOWL (Spell Checker Oriented Word Lists)](http://wordlist.aspell.net/) by Kevin Atkinson (see [`LICENSE.SCOWL`](LICENSE.SCOWL)).
 
