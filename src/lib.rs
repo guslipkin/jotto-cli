@@ -7,6 +7,7 @@ use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
 
 pub mod cli;
+pub mod concepts;
 pub mod dict;
 pub mod game;
 pub mod plain;

@@ -22,13 +22,13 @@ use crate::game::{
 };
 
 /// Okabe-Ito colorblind-safe palette
-const COLOR_ACCENT: Color = Color::Rgb(86, 180, 233); // Sky Blue (#56B4E9)
-const COLOR_POSITIVE: Color = Color::Rgb(0, 158, 115); // Bluish-Green (#009E73)
-const COLOR_NEGATIVE: Color = Color::Rgb(213, 94, 0); // Vermilion / Orange-Red (#D55E00)
-const COLOR_WARNING: Color = Color::Rgb(230, 159, 0); // Orange (#E69F00)
+pub(crate) const COLOR_ACCENT: Color = Color::Rgb(86, 180, 233); // Sky Blue (#56B4E9)
+pub(crate) const COLOR_POSITIVE: Color = Color::Rgb(0, 158, 115); // Bluish-Green (#009E73)
+pub(crate) const COLOR_NEGATIVE: Color = Color::Rgb(213, 94, 0); // Vermilion / Orange-Red (#D55E00)
+pub(crate) const COLOR_WARNING: Color = Color::Rgb(230, 159, 0); // Orange (#E69F00)
 
 /// Minimum recommended terminal width in columns.
-const MIN_RECOMMENDED_WIDTH: u16 = 70;
+pub(crate) const MIN_RECOMMENDED_WIDTH: u16 = 70;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusPanel {
@@ -548,7 +548,7 @@ fn letter_cell_width(inner_width: u16) -> u16 {
     }
 }
 
-fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
+pub(crate) fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
@@ -596,7 +596,7 @@ fn wrapped_line_count(text: &str, max_width: u16) -> u16 {
 }
 
 /// RAII guard that ensures the terminal is restored on exit or panic unwinding.
-struct TerminalGuard;
+pub(crate) struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
@@ -1599,7 +1599,7 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
     }
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

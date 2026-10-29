@@ -3,7 +3,7 @@ name = "jotto"
 version = "0.1.0"
 edition = "2021"
 authors = ["Gus Lipkin"]
-description = "CLI versions of the classic Jotto and Wordle word games written in Rust"
+description = "CLI versions of the classic Jotto and Wordle word games, and the Concepts meaning game, written in Rust"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/guslipkin/jotto-cli"
@@ -17,6 +17,10 @@ path = "src/main.rs"
 [[bin]]
 name = "wordle"
 path = "src/bin/wordle.rs"
+
+[[bin]]
+name = "concepts"
+path = "src/bin/concepts.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
