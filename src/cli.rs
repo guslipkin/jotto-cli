@@ -10,15 +10,17 @@ pub struct CliArgs {
     #[arg(short, long)]
     pub plain: bool,
 
-    /// Word list difficulty level (easy=35, medium=50, hard=70, scrabble=80, insane=95)
-    #[arg(short, long, value_enum, default_value_t = Difficulty::Scrabble)]
-    pub difficulty: Difficulty,
+    /// Word list difficulty level (easy=35, medium=50, hard=70, scrabble=80, insane=95;
+    /// default scrabble). Starts a new game instead of resuming a saved one
+    #[arg(short, long, value_enum)]
+    pub difficulty: Option<Difficulty>,
 
-    /// Play the deterministic UTC daily word challenge
+    /// Play the deterministic UTC daily word challenge (instead of resuming a saved game)
     #[arg(long, conflicts_with = "word")]
     pub daily: bool,
 
-    /// Optional custom 5-letter secret word (for testing or custom games)
+    /// Optional custom 5-letter secret word (for testing or custom games; starts a new
+    /// game instead of resuming a saved one)
     #[arg(short, long)]
     pub word: Option<String>,
 }

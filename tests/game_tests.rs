@@ -69,8 +69,47 @@ fn test_difficulty_pools_are_monotonic_both_modes() {
         assert!(medium < hard);
         assert!(hard < scrabble);
         assert!(scrabble < insane);
-        assert_eq!(insane, dict::total_words(mode));
+        match mode {
+            GameMode::Jotto => assert_eq!(insane, dict::total_words(mode)),
+            // Plurals are guessable but never the answer.
+            GameMode::Wordle => assert!(insane < dict::total_words(mode)),
+        }
     }
+}
+
+#[test]
+fn test_wordle_answers_are_never_plurals_but_plurals_are_guessable() {
+    let plurals = ["costs", "cards", "boxes", "tells", "weeds", "needs"];
+    let singulars = [
+        "chaos", "bonus", "grass", "oasis", "dress", "focus", "crane",
+    ];
+    for w in plurals.iter().chain(&singulars) {
+        assert!(
+            dict::contains(GameMode::Wordle, w),
+            "'{w}' should be guessable"
+        );
+    }
+    for _ in 0..3000 {
+        let (w, _) = dict::random_word_excluding(GameMode::Wordle, 95, &HashSet::new());
+        assert!(!plurals.contains(&w), "'{w}' is a plural answer");
+    }
+    let today = dict::current_utc_days();
+    for day in today..today + 400 {
+        let w = dict::daily_word_for_day(GameMode::Wordle, day);
+        assert!(!plurals.contains(&w), "daily '{w}' is a plural");
+    }
+    // The pool still has words ending in s that aren't plurals.
+    let s_ending = (0..5000)
+        .map(|_| dict::random_word_excluding(GameMode::Wordle, 95, &HashSet::new()).0)
+        .filter(|w| w.ends_with('s'))
+        .count();
+    assert!(s_ending > 0, "no answer ends in 's' at all");
+    let mut game =
+        GameState::new_with_mode(GameMode::Wordle, Difficulty::Scrabble, Some("crane")).unwrap();
+    assert!(
+        game.make_guess("cards").is_ok(),
+        "plural guesses must be accepted"
+    );
 }
 
 #[test]

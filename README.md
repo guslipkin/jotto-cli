@@ -1,6 +1,6 @@
-# Jotto & Wordle CLI
+# Jotto, Wordle & Contexto CLI
 
-Fast, lightweight Rust CLI versions of the classic **Jotto** and **Wordle** 5-letter word games (ported from [`guslipkin/jotto`](https://github.com/guslipkin/jotto)). Installing this crate provides both the `jotto` and `wordle` commands.
+Fast, lightweight Rust CLI versions of the classic **Jotto** and **Wordle** 5-letter word games (ported from [`guslipkin/jotto`](https://github.com/guslipkin/jotto)), plus **Contexto**, an unofficial version of [Contexto](https://contexto.me/), a game of finding a word by its meaning. Installing this crate provides the `jotto`, `wordle` and `contexto` commands.
 
 ## Rules
 
@@ -13,30 +13,43 @@ Jotto is a word-deduction game where you try to guess the secret five-letter wor
 ### Wordle (`wordle`)
 Wordle gives you **6 guesses** to find the secret five-letter word:
 - **Repeating letters are allowed** (uses the full 5-letter dictionary for the selected difficulty).
+- Like the original, the answer is **never a plural** (or an -s verb form like "tells"), though plurals are fine as guesses.
 - The word is **not a proper noun**.
 - After each guess, each letter is marked with colorblind-safe feedback:
   - `+X+` (Green): Letter is in the word and in the **exact position**.
   - `?X?` (Orange): Letter is in the word, but in a **different position**.
   - `~X~` (Gray / Crossed Out): Letter is **not in the word** (or is an excess duplicate).
 
+### Contexto (`contexto`)
+Contexto asks you to find a secret word by its meaning:
+- The secret word is a **common noun**. Guesses can be any common noun, verb, adjective or adverb (not names, places, brands, or function words like "the"). Words that are also names count when they have a common meaning of their own ("robin", "creek", "apple").
+- Each guess gets a **rank**: how close its meaning is to the secret word's, out of every ranked word. **#1 is the secret word.** Rarer words ("lemongrass", "ptarmigan") are accepted too: each shares the rank of the ranked word it falls next to, but never shows up in hints or the closest-words list.
+- Plurals and other forms count as their base word: "mice" is scored as "mouse", "went" as "go".
+- Closeness comes from how words are used together, so a close word can share a topic ("ocean" and "coast") as well as a meaning.
+- Guesses are unlimited. A **hint** reveals the word at half your best guess's rank (best #84 reveals #42), or the #300 word before you've guessed. Hints don't count as guesses, so after one you need a closer guess of your own for another.
+
 ## Features
 
-- **Two Games, One Shared Codebase (`jotto` & `wordle`)**:
-  - **Full-screen Terminal UI (TUI)** by default with a live Guess box, Used Letters tracker (manual Scratch pad in Jotto; auto-colored letter states in Wordle), and History / 6-Guess Board.
+- **Three Games, One Shared Codebase (`jotto`, `wordle` & `contexto`)**:
+  - **Full-screen Terminal UI (TUI)** by default with a live Guess box, Used Letters tracker (manual Scratch pad in Jotto; auto-colored letter states in Wordle), and History / 6-Guess Board; in Contexto, a closest-first list of guesses with colorblind-safe closeness bars.
   - **Plain / REPL Mode (`--plain`)** for line-by-line terminal sessions or non-TTY pipes.
 - **Minimal Word Recycling**:
-  - **Daily Mode (`--daily` or `Ctrl+T`)**: Uses a deterministic 90%-pool cooldown (~14.2 years for Jotto, ~22.0 years for Wordle) on the Scrabble (`80`) word list before any daily word can repeat.
+  - **Daily Mode (`--daily` or `Ctrl+T`)**: Uses a deterministic cooldown of 90% of the Scrabble (`80`) word list's size in days (well over a decade for both games) before any daily word can repeat.
   - **Random Mode**: Tracks dealt words across resets so a word never repeats in a session until the entire difficulty pool has been played.
+  - **Contexto** daily words are always Medium: a fixed shuffle of its Medium secret nouns, one a day, so none repeats until every one has been used (several years).
 - **Fresh SCOWL Dictionary at Build Time**:
-  - Pulls the latest word lists directly from [`en-wl/wordlist`](https://github.com/en-wl/wordlist) during `cargo build` via `build.rs` and embeds a single compact dictionary shared by both games.
+  - Pulls the latest word lists directly from [`en-wl/wordlist`](https://github.com/en-wl/wordlist) during `cargo build` via `build.rs` and embeds a single compact dictionary shared by Jotto and Wordle.
+- **Offline Word Meanings (Contexto)**:
+  - `data/contexto.bin` (~18 MB, embedded in the `contexto` binary) holds its word list and a 300-dimension [GloVe](https://nlp.stanford.edu/projects/glove/) vector per word, so ranking needs no network. It's committed rather than built, since GloVe is an 822 MB download; see [Updating the Contexto data](#updating-the-contexto-data).
+- **Saved Games**: Quit mid-game and the next launch picks up where you left off (see [Saved games](#saved-games)).
 - **Minimal Dependencies**:
-  - Only 4 direct dependencies (`ratatui`, `crossterm`, `clap`, `fastrand`).
+  - Only 6 direct dependencies (`ratatui`, `crossterm`, `clap`, `fastrand`, and `serde` / `serde_json` for saved games).
 
 ## Installation
 
 ### Pre-built Binaries
 
-Download the latest `jotto` and `wordle` binaries for Linux, macOS, or Windows from the [GitHub Releases](https://github.com/guslipkin/jotto-cli/releases) page.
+Download the latest `jotto`, `wordle` and `contexto` binaries for Linux, macOS, or Windows from the [GitHub Releases](https://github.com/guslipkin/jotto-cli/releases) page.
 
 ### Build from Source
 
@@ -49,13 +62,15 @@ cargo install --path .
 ## Usage
 
 ```bash
-# Launch Jotto or Wordle in full-screen TUI mode (default difficulty: Scrabble / 80)
+# Launch Jotto, Wordle or Contexto in full-screen TUI mode (default difficulty: Scrabble / 80)
 jotto
 wordle
+contexto
 
 # Launch the deterministic UTC Daily Challenge
 jotto --daily
 wordle --daily
+contexto --daily
 
 # Launch with a specific difficulty level (easy, medium, hard, scrabble, insane)
 jotto --difficulty hard
@@ -64,7 +79,16 @@ wordle --difficulty easy
 # Launch in line-by-line Plain / REPL mode
 jotto --plain
 wordle --plain
+contexto --plain
 ```
+
+Contexto's difficulty (`--difficulty easy|medium|hard`, default medium) sets how abstract the secret word may be; see [Contexto difficulty levels](#contexto-difficulty-levels). `--word <word>` sets its secret for a custom game: any word it accepts as a guess, including a plural or other form (`--word mice` makes the secret "mouse").
+
+### Saved Games
+
+Each game saves itself after every guess, hint and scratch-pad mark, so you can quit (or close the terminal) and come back. Launching it again resumes the unfinished game and says so; a daily game from an earlier day resumes too, and `Ctrl+T` / `:daily` switches to today's. Passing `--difficulty`, `--daily` or `--word` starts that new game instead, replacing the saved one.
+
+Saves live in a hidden `.ndt` folder in your home directory (`~/.ndt/jotto.json`, `wordle.json` and `contexto.json`; set `NDT_SAVE_DIR` to use another folder), along with a `README.txt` saying what made the folder and what it's for. A finished game isn't kept, so the next launch starts a new one. So a glance at the file doesn't spoil the game, the secret word is base64-encoded; the folder's `README.txt` shows how to decode or change it (`echo 'Y3JhbmU=' | base64 --decode` prints `crane`). Deleting the file starts you fresh. If a save can't be read (it's damaged, or from a different version), the game says so and starts a new one.
 
 ### TUI Controls
 
@@ -83,6 +107,8 @@ All bottom bar buttons (**Guess**, **Help**, **New Game**, **Daily**, **Give Up*
 | `Up` / `Down` or Mouse Wheel | Scroll guess history |
 | `Esc`, `Ctrl+C`, or Click **Quit** | Quit |
 
+Contexto's TUI has the same **Guess**, **Help**, **New Game**, **Daily**, **Give Up** and **Quit** controls and a **Difficulty** button (`Ctrl+D` cycles Easy → Medium → Hard), no Scratch pad, and one more: `Tab` or Click **Hint** reveals a closer word. Its **Latest** box shows your most recent guess, and the list shows every guess closest first (hints marked `*`).
+
 ### Plain / REPL Commands (`--plain`)
 
 - `<5-letter word>`: Submit a guess
@@ -96,17 +122,48 @@ All bottom bar buttons (**Guess**, **Help**, **New Game**, **Daily**, **Give Up*
 - `:credits`: Show author and dictionary credits
 - `:quit` or `:exit`: Exit
 
-## Difficulty Levels (SCOWL)
+Contexto's plain mode takes any word as a guess, so its commands need their colon (typing `exit` or `help` guesses that word). It has `:help`, `:history` (every guess, closest first), `:hint`, `:new [difficulty]`, `:daily`, `:difficulty [level]`, `:giveup`, `:credits` and `:quit`.
 
-Each difficulty setting includes all words from the levels before it:
-- **Easy (`35`)**: Recommended small dictionary (`2,443` Jotto words / `3,615` Wordle words).
-- **Medium (`50`)**: Recommended medium dictionary (`3,157` Jotto words / `4,722` Wordle words).
-- **Hard (`70`)**: Recommended large dictionary (`4,768` Jotto words / `7,309` Wordle words).
-- **Scrabble (`80`)**: Strange and unusual words used in word games like Scrabble (`5,768` Jotto words / `8,920` Wordle words, default).
-- **🤷 Insane (`95`)**: Every valid 5-letter English word in SCOWL (`7,463` Jotto words / `11,542` Wordle words).
+## Contexto Difficulty Levels
+
+Contexto's levels set how abstract the secret noun may be, since a thing you can point at is far easier to find by meaning than an idea. Each level includes the easier levels' words:
+- **Easy**: objects, people, animals, food and places ("elephant", "bread", "doctor").
+- **Medium**: adds acts, events, groups and times ("baseball", "ceremony", "parliament"; the default, and always used for daily games).
+- **Hard**: adds ideas, feelings, qualities and states ("credibility", "democracy", "anxiety").
+
+Each word's level comes from WordNet's category for its most common sense. Ranks and guesses are the same at every level; only the secret changes.
+
+## Difficulty Levels (SCOWL, Jotto & Wordle)
+
+Each difficulty setting includes all words from the levels before it. The word lists come from the latest SCOWL at build time, so each level's exact count can change between builds; the in-game help (`?` or `:help`) shows the current ones, as it does for Contexto.
+- **Easy (`35`)**: Recommended small dictionary.
+- **Medium (`50`)**: Recommended medium dictionary.
+- **Hard (`70`)**: Recommended large dictionary.
+- **Scrabble (`80`)**: Strange and unusual words used in word games like Scrabble (default).
+- **🤷 Insane (`95`)**: Every valid 5-letter English word in SCOWL. Wordle accepts every word in the list as a guess, plurals included, at any level.
+
+## Updating the Contexto data
+
+`scripts/build-contexto-data.py` writes `data/contexto.bin`. It needs only Python 3, the SCOWL database `build.rs` leaves in `OUT_DIR` after any `cargo build`, and GloVe 6B's 300-dimension vectors (`glove.6B.300d.txt` from `glove.6B.zip`, at [Stanford](https://nlp.stanford.edu/projects/glove/) or [Hugging Face](https://huggingface.co/stanfordnlp/glove)):
+
+```bash
+python3 scripts/build-contexto-data.py \
+  --scowl-db target/release/build/jotto-*/out/wordlist/scowl.db \
+  --glove glove.6B.300d.txt \
+  --wordnet wordnet \
+  --show ocean guitar   # optional: print each word's nearest neighbours to check the result
+```
+
+Add `--cased-vocab glove.840B.300d.txt` to refresh `data/contexto-proper-nouns.txt` as well.
+
+Ranked words are SCOWL's medium (`50`) list's nouns, verbs, adjectives and adverbs among GloVe's 100,000 most frequent words. Guess-only words are every other SCOWL word in GloVe's whole 400,000-word vocabulary, less inflections of ranked words ("stained" scores as "stain"); they're kept out of the ranks because past size 50 SCOWL adds names and rarer words, whose vectors are noisier. Secret words are the medium (`50`) list's nouns among GloVe's 50,000 most frequent, minus the script's hand-checked exclusions (words mostly used as something other than a noun, such as verbs, numbers and shortened forms, and unpleasant or crude words). Names, places and brands are left out entirely, from the committed `data/contexto-proper-nouns.txt`: `--cased-vocab` (GloVe 840B, a 2 GB download from the same pages, needed only to refresh that list) marks a word when it appears far more often capitalized than not, SCOWL's lists of names, surnames or towns have it capitalized (so "Americanization", merely spelled capitalized, stays), and WordNet has no commonly used lowercase sense of it; `PROPER_NOUN_KEEP` and `PROPER_NOUN_DROP` in the script fix the cases the rule gets wrong. Secret words' difficulty tiers come from WordNet 3.0's dict files (the `wordnet` directory, from [Princeton](https://wordnet.princeton.edu/) or NLTK's data repository's `packages/corpora/wordnet.zip`).
 
 ## Credits & License
 
 - Written by [Gus Lipkin](https://guslipkin.me).
+- [Wordle](https://www.nytimes.com/games/wordle) was created by Josh Wardle and is now published by The New York Times; `wordle` is an unofficial version. Play the original at <https://www.nytimes.com/games/wordle>.
+- `contexto` is an unofficial version of [Contexto](https://contexto.me/); play the original at <https://contexto.me/>.
 - Word list from [SCOWL (Spell Checker Oriented Word Lists)](http://wordlist.aspell.net/) by Kevin Atkinson (see [`LICENSE.SCOWL`](LICENSE.SCOWL)).
+- Contexto's word meanings (and, from GloVe 840B's cased vocabulary, which words are names) from [GloVe](https://nlp.stanford.edu/projects/glove/) by Jeffrey Pennington, Richard Socher and Christopher D. Manning, made available under the [Open Data Commons Public Domain Dedication and License](https://opendatacommons.org/licenses/pddl/1-0/).
+- Contexto's difficulty levels from [WordNet 3.0](https://wordnet.princeton.edu/) (Princeton University, "WordNet 3.0", 2006) noun categories; only the derived level, not WordNet itself, is in the binary.
 

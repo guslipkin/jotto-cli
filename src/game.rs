@@ -3,9 +3,11 @@ use std::fmt;
 use std::str::FromStr;
 
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 
 use crate::dict;
 pub use crate::dict::GameMode;
+use crate::save::{self, enum_name, parse_enum, Loaded, Notice, Saveable, SAVE_VERSION};
 
 /// Maximum number of guesses allowed in a standard Wordle game.
 pub const MAX_WORDLE_GUESSES: usize = 6;
@@ -171,6 +173,29 @@ impl ScratchState {
             Self::Positive => Self::Default,
         }
     }
+}
+
+/// A Jotto or Wordle save file (see [`crate::save`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedGame {
+    pub version: u32,
+    /// The unfinished game, if any.
+    pub game: Option<SavedPlay>,
+}
+
+/// An unfinished Jotto or Wordle game, replayed on load.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedPlay {
+    pub difficulty: String,
+    /// Base64 in the file, so opening it doesn't give the answer away.
+    #[serde(with = "save::encoded")]
+    pub secret: String,
+    pub daily_date: Option<String>,
+    pub guesses: Vec<String>,
+    /// Jotto's scratch pad, one character per letter a-z: `.` unmarked, `x` crossed
+    /// out, `+` marked as in the word. Not written for Wordle, which has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scratch: Option<String>,
 }
 
 /// Core state machine for a Jotto or Wordle game session.
@@ -361,9 +386,10 @@ impl GameState {
     }
 
     /// Cycles a letter (`a..=z`, case-insensitive) through `Default -> ScratchedOut -> Positive -> Default`.
+    /// Does nothing in Wordle, which has no scratch pad.
     pub fn toggle_scratch(&mut self, c: char) {
         let lower = c.to_ascii_lowercase();
-        if lower.is_ascii_lowercase() {
+        if self.mode == GameMode::Jotto && lower.is_ascii_lowercase() {
             let idx = (lower as u8 - b'a') as usize;
             self.scratched_letters[idx] = self.scratched_letters[idx].next();
         }
@@ -399,6 +425,91 @@ impl GameState {
             lines.push(row);
         }
         lines.join("\n")
+    }
+
+    /// Starts a game from the command line's choices and the player's save (see
+    /// [`save::start`]).
+    pub fn start(
+        mode: GameMode,
+        difficulty: Option<Difficulty>,
+        daily: bool,
+        word: Option<&str>,
+        loaded: Loaded<SavedGame>,
+    ) -> Result<(Self, Option<Notice>), GuessError> {
+        let asked_for_game = difficulty.is_some() || daily || word.is_some();
+        save::start(
+            loaded,
+            asked_for_game,
+            |saved| Self::from_saved(mode, saved),
+            || {
+                if daily {
+                    Ok(Self::new_daily_with_mode(mode))
+                } else {
+                    Self::new_with_mode(mode, difficulty.unwrap_or_default(), word)
+                }
+            },
+        )
+    }
+
+    /// What to save: the game while it's being played, otherwise nothing.
+    pub fn to_saved(&self) -> SavedGame {
+        let game = (self.status == GameStatus::Playing).then(|| SavedPlay {
+            difficulty: enum_name(self.difficulty),
+            secret: self.secret_word.clone(),
+            daily_date: self.daily_date.clone(),
+            guesses: self.history.iter().map(|r| r.guess.clone()).collect(),
+            scratch: (self.mode == GameMode::Jotto).then(|| {
+                self.scratched_letters
+                    .iter()
+                    .map(|s| match s {
+                        ScratchState::Default => '.',
+                        ScratchState::ScratchedOut => 'x',
+                        ScratchState::Positive => '+',
+                    })
+                    .collect()
+            }),
+        });
+        SavedGame {
+            version: SAVE_VERSION,
+            game,
+        }
+    }
+
+    /// Rebuilds a saved unfinished game by replaying its guesses (`None` when the
+    /// save has no game in progress).
+    pub fn from_saved(mode: GameMode, saved: &SavedGame) -> Result<Option<Self>, String> {
+        let Some(play) = &saved.game else {
+            return Ok(None);
+        };
+        let difficulty = parse_enum(&play.difficulty)
+            .ok_or_else(|| format!("unknown difficulty '{}'", play.difficulty))?;
+        let mut game = Self::new_with_mode(mode, difficulty, Some(&play.secret))
+            .map_err(|e| format!("its word no longer works ({e})"))?;
+        game.daily_date = play.daily_date.clone();
+        for guess in &play.guesses {
+            game.make_guess(guess)
+                .map_err(|e| format!("the guess '{guess}' no longer works ({e})"))?;
+        }
+        if game.status != GameStatus::Playing {
+            return Err("its guesses already finish it".to_string());
+        }
+        // Only Jotto reads one; a scratch pad in a Wordle save is ignored.
+        let scratch = match (&play.scratch, mode) {
+            (Some(scratch), GameMode::Jotto) => scratch,
+            _ => return Ok(Some(game)),
+        };
+        if scratch.len() != 26 {
+            return Err("its scratch pad is damaged".to_string());
+        }
+        for (slot, c) in game.scratched_letters.iter_mut().zip(scratch.chars()) {
+            *slot = match c {
+                '.' => ScratchState::Default,
+                'x' => ScratchState::ScratchedOut,
+                '+' => ScratchState::Positive,
+                _ => return Err("its scratch pad is damaged".to_string()),
+            };
+        }
+        Ok(Some(game))
     }
 
     /// Validates and submits a guess, updating history, used letters, letter states, and win/loss status.
@@ -445,6 +556,12 @@ impl GameState {
         }
 
         Ok(round)
+    }
+}
+
+impl Saveable for GameState {
+    fn daily_date(&self) -> Option<&str> {
+        self.daily_date.as_deref()
     }
 }
 

@@ -6,9 +6,11 @@ use crate::game::{
     supports_color, Difficulty, GameMode, GameState, GameStatus, LetterState, ScratchState,
     MAX_WORDLE_GUESSES,
 };
+use crate::save::Autosave;
+use crate::tui::{ansi_rgb, COLOR_NEGATIVE, COLOR_POSITIVE, COLOR_WARNING};
 
 /// Runs the line-by-line REPL / Plain CLI mode for either Jotto or Wordle.
-pub fn run(mut game: GameState) -> io::Result<()> {
+pub fn run(mut game: GameState, autosave: &mut Autosave) -> io::Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mode = game.mode();
@@ -30,9 +32,17 @@ pub fn run(mut game: GameState) -> io::Result<()> {
         );
     }
     println!("Type a 5-letter word to guess, or ':help' for commands.");
+    if let Some(notice) = autosave.notice.take() {
+        println!("{}", notice.text());
+        if !game.history().is_empty() {
+            print_board(&game, use_color);
+        }
+    }
 
     let mut lines = stdin.lock().lines();
     loop {
+        // Every command and guess comes back here, so this saves each change.
+        autosave.sync(&game.to_saved());
         print!("{}> ", mode.command_name());
         stdout.flush()?;
 
@@ -68,21 +78,16 @@ pub fn run(mut game: GameState) -> io::Result<()> {
                 print_board(&game, use_color);
                 continue;
             }
-            ":scratch" | "scratch" => {
-                if mode == GameMode::Wordle {
-                    println!(
-                        "Used letters are automatically tracked in Wordle (type ':history' to view)."
-                    );
-                } else {
-                    for token in &rest {
-                        for ch in token.chars() {
-                            if ch.is_ascii_alphabetic() {
-                                game.toggle_scratch(ch);
-                            }
+            // Jotto only: Wordle has no scratch pad, so there it's an unknown command.
+            ":scratch" | "scratch" if mode == GameMode::Jotto => {
+                for token in &rest {
+                    for ch in token.chars() {
+                        if ch.is_ascii_alphabetic() {
+                            game.toggle_scratch(ch);
                         }
                     }
-                    print_scratch(&game, use_color);
                 }
+                print_scratch(&game, use_color);
                 continue;
             }
             ":giveup" | "giveup" => {
@@ -226,8 +231,12 @@ pub fn run(mut game: GameState) -> io::Result<()> {
 fn format_wordle_letter(ch: char, state: LetterState, use_color: bool, padded: bool) -> String {
     if use_color {
         match state {
-            LetterState::Correct => format!("\x1b[1;30;48;2;0;158;115m {ch} \x1b[0m"),
-            LetterState::Present => format!("\x1b[1;30;48;2;230;159;0m {ch} \x1b[0m"),
+            LetterState::Correct => {
+                format!("\x1b[1;30;48;2;{}m {ch} \x1b[0m", ansi_rgb(COLOR_POSITIVE))
+            }
+            LetterState::Present => {
+                format!("\x1b[1;30;48;2;{}m {ch} \x1b[0m", ansi_rgb(COLOR_WARNING))
+            }
             LetterState::Absent => {
                 if padded {
                     format!("\x1b[90;9m {ch} \x1b[0m")
@@ -253,13 +262,15 @@ fn format_scratch_tokens(game: &GameState, use_color: bool) -> Vec<String> {
             let ch = (b'A' + i as u8) as char;
             match (state, use_color) {
                 (ScratchState::Default, _) => None,
-                (ScratchState::ScratchedOut, true) => {
-                    Some(format!("\x1b[1;9;30;48;2;213;94;0m {ch} \x1b[0m"))
-                }
+                (ScratchState::ScratchedOut, true) => Some(format!(
+                    "\x1b[1;9;30;48;2;{}m {ch} \x1b[0m",
+                    ansi_rgb(COLOR_NEGATIVE)
+                )),
                 (ScratchState::ScratchedOut, false) => Some(format!("~{ch}~")),
-                (ScratchState::Positive, true) => {
-                    Some(format!("\x1b[1;30;48;2;0;158;115m {ch} \x1b[0m"))
-                }
+                (ScratchState::Positive, true) => Some(format!(
+                    "\x1b[1;30;48;2;{}m {ch} \x1b[0m",
+                    ansi_rgb(COLOR_POSITIVE)
+                )),
                 (ScratchState::Positive, false) => Some(format!("+{ch}+")),
             }
         })
@@ -378,7 +389,7 @@ fn print_help(mode: GameMode, use_color: bool) {
             let present = format_wordle_letter('X', LetterState::Present, use_color, false);
             let absent = format_wordle_letter('X', LetterState::Absent, use_color, false);
             println!("Wordle is a game where you have 6 guesses to find the five-letter word:");
-            println!("  - Repeating letters are allowed; the word is not a proper noun");
+            println!("  - Repeating letters are allowed; the word is not a proper noun or plural");
             println!("  - {exact} means letter X is in the word and in the exact spot");
             println!("  - {present} means letter X is in the word, but in a different spot");
             println!("  - {absent} means letter X is not in the word in any spot");
@@ -416,5 +427,10 @@ fn print_credits(mode: GameMode) {
         mode.title()
     );
     println!("The word list comes from SCOWL (http://wordlist.aspell.net/).");
+    if mode == GameMode::Wordle {
+        println!(
+            "Wordle was created by Josh Wardle; play the original at https://www.nytimes.com/games/wordle"
+        );
+    }
     println!();
 }

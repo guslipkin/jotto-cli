@@ -1,6 +1,7 @@
 use std::io::{self, stdout};
 use std::panic;
 
+use crossterm::cursor::Show;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseButton, MouseEventKind,
@@ -20,15 +21,16 @@ use crate::dict;
 use crate::game::{
     supports_color, GameMode, GameState, GameStatus, LetterState, ScratchState, MAX_WORDLE_GUESSES,
 };
+use crate::save::{Autosave, Notice};
 
 /// Okabe-Ito colorblind-safe palette
-const COLOR_ACCENT: Color = Color::Rgb(86, 180, 233); // Sky Blue (#56B4E9)
-const COLOR_POSITIVE: Color = Color::Rgb(0, 158, 115); // Bluish-Green (#009E73)
-const COLOR_NEGATIVE: Color = Color::Rgb(213, 94, 0); // Vermilion / Orange-Red (#D55E00)
-const COLOR_WARNING: Color = Color::Rgb(230, 159, 0); // Orange (#E69F00)
+pub(crate) const COLOR_ACCENT: Color = Color::Rgb(86, 180, 233); // Sky Blue (#56B4E9)
+pub(crate) const COLOR_POSITIVE: Color = Color::Rgb(0, 158, 115); // Bluish-Green (#009E73)
+pub(crate) const COLOR_NEGATIVE: Color = Color::Rgb(213, 94, 0); // Vermilion / Orange-Red (#D55E00)
+pub(crate) const COLOR_WARNING: Color = Color::Rgb(230, 159, 0); // Orange (#E69F00)
 
 /// Minimum recommended terminal width in columns.
-const MIN_RECOMMENDED_WIDTH: u16 = 70;
+pub(crate) const MIN_RECOMMENDED_WIDTH: u16 = 70;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusPanel {
@@ -548,7 +550,7 @@ fn letter_cell_width(inner_width: u16) -> u16 {
     }
 }
 
-fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
+pub(crate) fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
@@ -596,45 +598,80 @@ fn wrapped_line_count(text: &str, max_width: u16) -> u16 {
 }
 
 /// RAII guard that ensures the terminal is restored on exit or panic unwinding.
-struct TerminalGuard;
+pub(crate) struct TerminalGuard;
 
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
-    }
-}
-
-/// Runs the full-screen interactive TUI.
-pub fn run(game: GameState) -> io::Result<()> {
+/// Switches the terminal to full-screen raw mode for a TUI. It's restored when the
+/// guard drops, and by a panic hook too, so a panic message prints on the normal
+/// screen rather than vanishing with the alternate one.
+pub(crate) fn enter_tui() -> io::Result<(TerminalGuard, Terminal<CrosstermBackend<io::Stdout>>)> {
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            Show
+        );
         original_hook(panic_info);
     }));
 
     enable_raw_mode()?;
+    // Made before anything else can fail, so raw mode never outlives an error. It
+    // comes first in the tuple so the terminal drops before it restores the screen.
+    let guard = TerminalGuard;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let _guard = TerminalGuard;
+    Ok((guard, Terminal::new(CrosstermBackend::new(stdout))?))
+}
 
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+/// A palette colour as an ANSI `r;g;b` triple, for plain mode's escape codes.
+pub(crate) fn ansi_rgb(color: Color) -> String {
+    match color {
+        Color::Rgb(r, g, b) => format!("{r};{g};{b}"),
+        other => unreachable!("palette colours are RGB, not {other:?}"),
+    }
+}
 
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            Show
+        );
+    }
+}
+
+/// Runs the full-screen interactive TUI.
+pub fn run(game: GameState, autosave: &mut Autosave) -> io::Result<()> {
     let mut app = TuiApp::new(game);
-    let res = run_event_loop(&mut terminal, &mut app);
+    if let Some(notice) = autosave.notice.take() {
+        app.message = Some((notice.text().to_string(), notice_color(&notice)));
+    }
+    let (_guard, mut terminal) = enter_tui()?;
+    run_event_loop(&mut terminal, &mut app, autosave)
+}
 
-    let _ = terminal.show_cursor();
-    res
+/// Colour of the status line telling the player about their save.
+pub(crate) fn notice_color(notice: &Notice) -> Color {
+    match notice {
+        Notice::Resumed(_) => COLOR_ACCENT,
+        Notice::Problem(_) => COLOR_WARNING,
+    }
 }
 
 fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut TuiApp,
+    autosave: &mut Autosave,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|f| draw_ui(f, app))?;
+        // Every key and click comes back here, so this saves each change.
+        autosave.sync(&app.game.to_saved());
 
         if app.should_quit {
             return Ok(());
@@ -1502,7 +1539,9 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
                 )),
                 Line::from(""),
                 Line::from("Wordle is a game where you have 6 guesses to find the 5-letter word:"),
-                Line::from("  • Repeating letters are allowed; the word is not a proper noun."),
+                Line::from(
+                    "  • Repeating letters are allowed; the word is not a proper noun or plural.",
+                ),
                 Line::from(vec![
                     Span::raw("  • "),
                     Span::styled(
@@ -1573,6 +1612,13 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
             )),
             Line::from("  • Created by Gus Lipkin (https://guslipkin.me)"),
             Line::from("  • Word list powered by SCOWL (http://wordlist.aspell.net/)"),
+        ]);
+        if mode == GameMode::Wordle {
+            help_text.push(Line::from(
+                "  • Wordle was created by Josh Wardle: https://www.nytimes.com/games/wordle",
+            ));
+        }
+        help_text.extend([
             Line::from(""),
             Line::from(Span::styled(
                 "Click anywhere or press [Esc] / [Enter] to close",
@@ -1590,7 +1636,7 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
     }
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
