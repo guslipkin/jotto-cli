@@ -31,11 +31,17 @@ fn test_lexicon_populated_and_sorted() {
         assert!(lex.index_of(word).is_some(), "'{word}' should be guessable");
     }
     // Function words and names aren't guessable.
-    for word in ["the", "of", "and", "she", "london"] {
+    for word in ["the", "of", "and", "she", "down", "around", "london"] {
         assert!(
             lex.resolve(word).is_none(),
             "'{word}' shouldn't be guessable"
         );
+    }
+    // Real words with a minor function or interjection sense are.
+    for word in [
+        "mine", "past", "vice", "bar", "man", "boy", "morning", "hello", "timber",
+    ] {
+        assert!(lex.index_of(word).is_some(), "'{word}' should be guessable");
     }
 }
 

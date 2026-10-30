@@ -64,9 +64,15 @@ FORMAT_VERSION = 2
 
 # SCOWL parts of speech a guess may be (base forms only). Function words
 # (determiners, pronouns, prepositions, conjunctions) aren't guessable: they
-# sit close to everything in GloVe and would only clutter the ranking.
+# sit close to everything in GloVe and would only clutter the ranking. But
+# many real words have a minor function sense ("mine", "past", "vice", "bar"),
+# so a word with one is dropped only when it's among GloVe's most frequent
+# words, where the true function words are ("the" is #0, "down" #135,
+# "around" #204; "mine" is #2,398). Interjections don't count: SCOWL lists
+# "man", "boy", "morning" and "hello" as interjections too.
 CONTENT_POSES = ("n0", "v0", "aj0", "av0", "a0", "m0")
-FUNCTION_BASE_POSES = ("d", "pn", "pp", "c", "s", "i")
+FUNCTION_BASE_POSES = ("d", "pn", "pp", "c", "s")
+FUNCTION_WORD_MAX_GLOVE_RANK = 300
 
 # Ranked (core) words: SCOWL's medium list, among GloVe's most frequent words.
 # Ranks, hints and the closest-words list come only from these.
@@ -82,10 +88,11 @@ CORE_MAX_GLOVE_RANK = 100_000
 GUESS_MAX_SIZE = 95
 GUESS_MAX_GLOVE_RANK = 400_000
 
-# Secret words: common nouns only, so every secret is something a player
+# Secret words: nouns from SCOWL's medium list among GloVe's 50,000 most
+# frequent words, so every secret is something a player
 # could reasonably name.
-SECRET_MAX_SIZE = 35
-SECRET_MAX_GLOVE_RANK = 12_000
+SECRET_MAX_SIZE = 50
+SECRET_MAX_GLOVE_RANK = 50_000
 SECRET_MIN_LENGTH = 3
 
 # WordNet noun categories (lexicographer files) by difficulty tier; any other
@@ -107,42 +114,126 @@ NON_NOUN_MAX_SIZE = 50
 # Inflections of any SCOWL size map to their base word.
 ALIAS_MAX_SIZE = 95
 
-# Never a secret word, though still guessable: slurs, profanity and
-# subjects that make an unpleasant daily puzzle.
+# Never a secret word, though still guessable: slurs, profanity, sexual words
+# and subjects that make an unpleasant daily puzzle, found by reading the
+# generated list.
 SECRET_BLOCKLIST = {
-    "abortion", "abuse", "anus", "ass", "assassination", "bastard", "bitch",
-    "bloodshed", "bomb", "breast", "butt", "cancer", "corpse", "crap", "cunt",
-    "damn", "death", "dick", "drug", "fag", "fuck", "genocide", "gun",
-    "gunfire", "gunman", "hell", "holocaust", "homicide", "homosexuality",
-    "kill", "killer", "massacre", "murder", "nazi", "negro", "nigger", "penis",
-    "piss", "porn", "pornography", "prostitute", "prostitution", "rape",
-    "rapist", "sex", "sexuality", "shit", "slaughter", "slave", "slavery",
-    "slut", "sniper", "suicide", "terror", "terrorism", "terrorist",
-    "torture", "vagina", "victim", "war", "whore",
+    "abortion", "abuse", "adultery", "anus", "ass", "assassination",
+    "bastard", "bimbo", "bitch", "bloodbath", "bloodshed", "bomb", "bondage",
+    "bong", "booby", "booty", "boozer", "breast", "brothel", "butt",
+    "cadaver", "cancer", "cannibalism", "carcinoma", "carnage",
+    "circumcision", "cleavage", "cock", "concubine", "condom", "coon",
+    "corpse", "crap", "cunt", "damn", "death", "dick", "drug", "dung", "dyke",
+    "electrocution", "erection", "euthanasia", "excrement", "executioner",
+    "exhumation", "extermination", "fag", "fanny", "feces", "fetish",
+    "firebomb", "fuck", "gallows", "genitalia", "genitals", "genocide", "gun",
+    "gunfight", "gunfire", "gunman", "gunshot", "gypsy", "hell", "herpes",
+    "hickey", "hitman", "holocaust", "homicide", "homophobia",
+    "homosexuality", "hooker", "incest", "infanticide", "infidel",
+    "insemination", "intercourse", "jihad", "jihadist", "kill", "killer",
+    "landmine", "leukemia", "lymphoma", "manslaughter", "massacre",
+    "masturbation", "melanoma", "milf", "molestation", "murder", "murderer",
+    "mutilation", "napalm", "nazi", "negro", "nigger", "nong", "noose",
+    "nudity", "obscenity", "orgasm", "orgy", "overdose", "pee", "penis",
+    "pimp", "piss", "pogrom", "porn", "pornography", "promiscuity",
+    "prostitute", "prostitution", "pussycat", "rape", "rapist", "retardation",
+    "scum", "semen", "sex", "sexuality", "shit", "shootout", "skinhead",
+    "slaughter", "slaughterhouse", "slave", "slavery", "sleaze", "slumdog",
+    "slut", "sniper", "sodomy", "sperm", "squaw", "stoner", "strangulation",
+    "stripper", "suck", "suffocation", "suicide", "supremacist", "swastika",
+    "syphilis", "teargas", "terror", "terrorism", "terrorist", "threesome",
+    "tit", "torture", "urine", "vagina", "victim", "virginity", "vomit",
+    "war", "warhead", "whore", "wiener",
 }
 
 # Nouns in SCOWL that people mostly use as something else, found by reading
-# the generated list: verbs, numbers, names and adjectives. SCOWL ranks both
+# the generated list: verbs, numbers and ordinals, Greek letters, shortened
+# forms, plural-only forms, interjections and pronouns ("yes", "nobody"),
+# names and adjectives. SCOWL ranks both
 # senses alike, so no rule above can tell them apart.
 SECRET_NOT_NOUNS = {
-    "affect", "amp", "are", "beloved", "best", "better", "billion", "bob",
-    "bologna", "can", "carry", "chi", "chile", "chuck", "cite", "compare",
-    "concentrate", "cooper", "cope", "cox", "damages", "die", "dig", "dole",
-    "don", "eight", "eighteen", "eighth", "eleven", "employ", "expose",
-    "fail", "feel", "fifteen", "fifth", "fifty", "fill", "find", "first",
-    "five", "folks", "ford", "forensic", "forthcoming", "forty", "four",
-    "fourteen", "fourth", "fuller", "gather", "get", "give", "glen", "gore",
-    "hang", "hart", "have", "heath", "humanitarian", "hundred", "invite",
-    "jay", "join", "keep", "ken", "latest", "lie", "listen", "look", "make",
-    "marshall", "mart", "martin", "mike", "million", "moo", "newton", "nick",
-    "nine", "ninth", "nova", "peter", "polish", "potter", "regards",
-    "reject", "remove", "resist", "rouge", "sally", "see", "sell", "serve",
-    "settle", "seven", "seventh", "sing", "singles", "six", "sixteen",
-    "sixth", "sixty", "smith", "steal", "sub", "take", "tang", "ten", "tenth",
-    "third", "thirteen", "thirty", "thousand", "three", "transform",
-    "trillion", "trump", "try", "turner", "twelve", "twenty", "two", "wade",
-    "want", "warren", "weigh", "will", "works", "worse", "worst", "wright",
-    "yen", "zero",
+    "ado", "affect", "airs", "aloha", "alt", "amends", "amp", "anti", "are",
+    "arms", "assign", "avail", "baa", "babe", "bake", "balk", "barker",
+    "barney", "bash", "basso", "bathe", "beck", "bellow", "beloved", "berg",
+    "best", "better", "billion", "bind", "blink", "blot", "blur", "boast",
+    "bob", "boil", "bologna", "boo", "bop", "bosh", "bother", "bowman",
+    "brad", "brag", "bravo", "bray", "brew", "browse", "bruin", "bruise",
+    "bump", "bunt", "bur", "burg", "burnish", "burr", "busby", "buss",
+    "bustle", "bye", "calif", "cam", "can", "carry", "chad", "chandler",
+    "char", "chew", "chi", "chile", "choke", "chop", "chuck", "chuckle",
+    "churn", "cite", "clap", "cling", "clog", "clump", "col", "collier",
+    "commute", "compare", "compress", "concentrate", "conditions", "confine",
+    "confines", "conserve", "contents", "coo", "cooper", "cope", "cote",
+    "cotter", "cough", "cox", "crawl", "cray", "creep", "crick", "crimp",
+    "cringe", "crouch", "cull", "cupid", "curie", "dab", "dale", "damages",
+    "dare", "davenport", "daze", "dazzle", "deb", "devise", "dictate", "die",
+    "dig", "ding", "dis", "disregard", "doc", "dole", "don", "doubles",
+    "droppings", "dub", "dyer", "eight", "eighteen", "eighteenth", "eighth",
+    "eighty", "eleven", "eleventh", "emery", "employ", "epsilon", "erg",
+    "eta", "expose", "fade", "fail", "falter", "farrow", "fatigues", "feel",
+    "fifteen", "fifteenth", "fifth", "fifty", "fill", "find", "first",
+    "firth", "five", "flagstaff", "flick", "flinch", "fling", "flourish",
+    "folks", "foo", "ford", "forensic", "forthcoming", "forty", "four",
+    "fourteen", "fourteenth", "fourth", "freeman", "fries", "fry", "ftp",
+    "fuller", "funds", "gag", "gage", "gamma", "gaol", "gasp", "gather",
+    "gaze", "gen", "get", "giggle", "gimme", "give", "glen", "glide", "glow",
+    "goodbye", "goodness", "goody", "gore", "grapple", "grasp", "graze",
+    "griffin", "grin", "grind", "gripe", "grits", "grumble", "grunt", "gush",
+    "hack", "hackney", "hallelujah", "hang", "hart", "haunt", "have", "haw",
+    "heath", "heave", "heavens", "heck", "hector", "heed", "hello", "hiss",
+    "hitch", "hock", "hogan", "homer", "hone", "hoon", "hostilities", "howl",
+    "huff", "hug", "hum", "humanitarian", "hundred", "hundredth", "hurl",
+    "hurrah", "hurry", "hush", "hustle", "hypo", "impress", "incline",
+    "initiate", "insert", "intercept", "interrupt", "invite", "ism",
+    "isolate", "itch", "jab", "jasper", "jay", "jerk", "jest", "jettison",
+    "jog", "join", "jolt", "josh", "juggle", "keep", "ken", "kidder", "kylie",
+    "lag", "lam", "lambda", "lament", "lander", "lapse", "lash", "lassie",
+    "latch", "latest", "laud", "lea", "lemma", "lib", "lick", "lie", "lieu",
+    "linens", "listen", "loads", "lob", "lodgings", "look", "loom", "lug",
+    "lurch", "maharishi", "make", "makings", "mamma", "marshall", "mart",
+    "martin", "mash", "mayday", "mayflower", "mecca", "med", "meg", "meld",
+    "melt", "mend", "mew", "mickey", "midst", "mike", "mil", "million",
+    "millionth", "mince", "minuteman", "mister", "moan", "momma", "mommy",
+    "moo", "mores", "mow", "mush", "nag", "nap", "newton", "nick",
+    "nickelodeon", "nine", "nineteen", "nineteenth", "ninety", "ninth", "nip",
+    "nite", "nobody", "nod", "noel", "nought", "nova", "nudge", "numbers",
+    "nurture", "oats", "obit", "oceanic", "ogle", "overlook", "override",
+    "pardon", "patsy", "peck", "peek", "peel", "peep", "perm", "peter",
+    "phoebe", "pip", "pluck", "plummet", "poke", "pol", "polish", "pooh",
+    "potter", "pounce", "practise", "prod", "prof", "prowl", "pry", "puff",
+    "punt", "quid", "rant", "ravel", "rebuff", "recycle", "ref", "regards",
+    "reject", "remove", "render", "rep", "repatriate", "resist", "retrieve",
+    "rev", "revel", "revise", "rewind", "rhea", "rick", "rinse", "rip",
+    "roar", "roots", "rouge", "royalties", "rub", "rue", "sag", "sahib",
+    "salaam", "sally", "save", "savor", "sawyer", "scatter", "scoff",
+    "scotch", "scrape", "scream", "scrooge", "scud", "scurry", "scuttle",
+    "see", "sell", "semi", "serve", "settle", "seven", "seventeen",
+    "seventeenth", "seventh", "seventy", "sexton", "shades", "sharper",
+    "shatter", "shave", "shearer", "shiver", "shoot", "shout", "shove",
+    "shred", "shrug", "shudder", "shuffle", "sidestep", "sigh", "sights",
+    "sigma", "sim", "simmer", "sine", "sing", "singles", "singleton", "sip",
+    "sis", "six", "sixteen", "sixteenth", "sixth", "sixty", "sizzle",
+    "skyrocket", "smarts", "smith", "smother", "sniff", "snoop", "soak",
+    "soar", "sol", "somebody", "sonny", "sop", "sow", "spawn", "splurge",
+    "sprinkle", "sprite", "squelch", "stare", "stat", "steal", "stein",
+    "stoker", "stomp", "stoop", "straddle", "stride", "stroll", "strut",
+    "stumble", "stymie", "sub", "superman", "surrey", "swain", "swat", "sway",
+    "sweats", "swipe", "swoon", "swoop", "sympathies", "tad", "tails", "take",
+    "takings", "tam", "tang", "taps", "tease", "temp", "ten", "tenth",
+    "thanksgiving", "thatcher", "theta", "third", "thirteen", "thirteenth",
+    "thirty", "thousand", "thrash", "three", "thud", "thump", "tic", "tickle",
+    "tilde", "till", "tinker", "toil", "tor", "tout", "tow", "transform",
+    "trillion", "trump", "try", "tuck", "tucker", "tumble", "tun", "turner",
+    "tweak", "twelfth", "twelve", "twentieth", "twenty", "two",
+    "underestimate", "underline", "underscore", "upside", "ute", "var",
+    "veer", "vibes", "viva", "waddle", "wade", "wag", "wagoner", "wail",
+    "wallop", "wane", "want", "warren", "waterworks", "waver", "weeds",
+    "weep", "weigh", "wen", "whack", "whales", "wheeler", "whine", "whisk",
+    "whistler", "whit", "wiggle", "wight", "will", "wilt", "wink", "winnings",
+    "withers", "wits", "wobble", "workings", "works", "worse", "worst", "wow",
+    "wrangle", "wrest", "wrestle", "wright", "wring", "yahoo", "yank", "yap",
+    "yawn", "yell", "yen", "yep", "yes", "yip", "yuk", "zac", "zack", "zap",
+    "zero", "zeta", "zoom",
     # Common nouns whose GloVe vector is mostly a name's, so their closest
     # words would be about the person, place or institution.
     "bush", "fisher", "march", "miller", "pentagon", "phoenix",
@@ -397,8 +488,12 @@ def main():
     args = parse_args()
     sizes, nouns, function_words, other_poses, capitalized, inflections = scowl_lists(args.scowl_db)
 
-    candidates = {w for w, s in sizes.items() if s <= GUESS_MAX_SIZE and w not in function_words and len(w) >= 2}
+    candidates = {w for w, s in sizes.items() if s <= GUESS_MAX_SIZE and len(w) >= 2}
     glove = read_glove(args.glove, candidates, GUESS_MAX_GLOVE_RANK)
+    glove = {
+        w: v for w, v in glove.items()
+        if not (w in function_words and v[0] < FUNCTION_WORD_MAX_GLOVE_RANK)
+    }
 
     if args.cased_vocab:
         proper = find_proper_nouns(
