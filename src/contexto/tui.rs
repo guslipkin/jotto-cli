@@ -13,9 +13,10 @@ use ratatui::{Frame, Terminal};
 use crate::contexto::data::lexicon;
 use crate::contexto::game::{bar_filled, grouped, Closeness, ContextoGame, Difficulty, Status};
 use crate::game::supports_color;
+use crate::save::Autosave;
 use crate::tui::{
-    centered_rect, enter_tui, rect_contains, COLOR_ACCENT, COLOR_NEGATIVE, COLOR_POSITIVE,
-    COLOR_WARNING, MIN_RECOMMENDED_WIDTH,
+    centered_rect, enter_tui, notice_color, rect_contains, COLOR_ACCENT, COLOR_NEGATIVE,
+    COLOR_POSITIVE, COLOR_WARNING, MIN_RECOMMENDED_WIDTH,
 };
 
 /// Background of the highlighted row in the guess list. A gray background rather
@@ -273,17 +274,27 @@ fn bar_spans(rank: usize, width: u16, use_color: bool) -> Vec<Span<'static>> {
 }
 
 /// Runs the full-screen interactive TUI.
-pub fn run(game: ContextoGame) -> io::Result<()> {
+pub fn run(game: ContextoGame, autosave: &mut Autosave) -> io::Result<()> {
+    let mut app = ContextoApp::new(game);
+    if let Some(notice) = autosave.notice.take() {
+        if let Some(last) = app.game.guesses().last() {
+            app.select_guess(last.number);
+        }
+        app.message = (notice.text().to_string(), notice_color(&notice));
+    }
     let (_guard, mut terminal) = enter_tui()?;
-    run_event_loop(&mut terminal, &mut ContextoApp::new(game))
+    run_event_loop(&mut terminal, &mut app, autosave)
 }
 
 fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut ContextoApp,
+    autosave: &mut Autosave,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|f| draw_ui(f, app))?;
+        // Every key and click comes back here, so this saves each change.
+        autosave.sync(&app.game.to_saved());
         if app.should_quit {
             return Ok(());
         }

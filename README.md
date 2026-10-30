@@ -41,8 +41,9 @@ Contexto asks you to find a secret word by its meaning:
   - Pulls the latest word lists directly from [`en-wl/wordlist`](https://github.com/en-wl/wordlist) during `cargo build` via `build.rs` and embeds a single compact dictionary shared by Jotto and Wordle.
 - **Offline Word Meanings (Contexto)**:
   - `data/contexto.bin` (~18 MB, embedded in the `contexto` binary) holds its word list and a 300-dimension [GloVe](https://nlp.stanford.edu/projects/glove/) vector per word, so ranking needs no network. It's committed rather than built, since GloVe is an 822 MB download; see [Updating the Contexto data](#updating-the-contexto-data).
+- **Saved Games**: Quit mid-game and the next launch picks up where you left off (see [Saved games](#saved-games)).
 - **Minimal Dependencies**:
-  - Only 4 direct dependencies (`ratatui`, `crossterm`, `clap`, `fastrand`).
+  - Only 6 direct dependencies (`ratatui`, `crossterm`, `clap`, `fastrand`, and `serde` / `serde_json` for saved games).
 
 ## Installation
 
@@ -82,6 +83,12 @@ contexto --plain
 ```
 
 Contexto's difficulty (`--difficulty easy|medium|hard`, default medium) sets how abstract the secret word may be; see [Contexto difficulty levels](#contexto-difficulty-levels). `--word <word>` sets its secret for a custom game: any word it accepts as a guess, including a plural or other form (`--word mice` makes the secret "mouse").
+
+### Saved Games
+
+Each game saves itself after every guess, hint and scratch-pad mark, so you can quit (or close the terminal) and come back. Launching it again resumes the unfinished game and says so; a daily game from an earlier day resumes too, and `Ctrl+T` / `:daily` switches to today's. Passing `--difficulty`, `--daily` or `--word` starts that new game instead, replacing the saved one.
+
+Saves live in a hidden `.ndt` folder in your home directory (`~/.ndt/jotto.json`, `wordle.json` and `contexto.json`; set `NDT_SAVE_DIR` to use another folder), along with a `README.txt` saying what made the folder and what it's for. A finished game isn't kept, so the next launch starts a new one. So a glance at the file doesn't spoil the game, the secret word is base64-encoded; the folder's `README.txt` shows how to decode or change it (`echo 'Y3JhbmU=' | base64 --decode` prints `crane`). Deleting the file starts you fresh. If a save can't be read (it's damaged, or from a different version), the game says so and starts a new one.
 
 ### TUI Controls
 

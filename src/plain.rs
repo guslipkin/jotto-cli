@@ -6,10 +6,11 @@ use crate::game::{
     supports_color, Difficulty, GameMode, GameState, GameStatus, LetterState, ScratchState,
     MAX_WORDLE_GUESSES,
 };
+use crate::save::Autosave;
 use crate::tui::{ansi_rgb, COLOR_NEGATIVE, COLOR_POSITIVE, COLOR_WARNING};
 
 /// Runs the line-by-line REPL / Plain CLI mode for either Jotto or Wordle.
-pub fn run(mut game: GameState) -> io::Result<()> {
+pub fn run(mut game: GameState, autosave: &mut Autosave) -> io::Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mode = game.mode();
@@ -31,9 +32,17 @@ pub fn run(mut game: GameState) -> io::Result<()> {
         );
     }
     println!("Type a 5-letter word to guess, or ':help' for commands.");
+    if let Some(notice) = autosave.notice.take() {
+        println!("{}", notice.text());
+        if !game.history().is_empty() {
+            print_board(&game, use_color);
+        }
+    }
 
     let mut lines = stdin.lock().lines();
     loop {
+        // Every command and guess comes back here, so this saves each change.
+        autosave.sync(&game.to_saved());
         print!("{}> ", mode.command_name());
         stdout.flush()?;
 
@@ -69,21 +78,16 @@ pub fn run(mut game: GameState) -> io::Result<()> {
                 print_board(&game, use_color);
                 continue;
             }
-            ":scratch" | "scratch" => {
-                if mode == GameMode::Wordle {
-                    println!(
-                        "Used letters are automatically tracked in Wordle (type ':history' to view)."
-                    );
-                } else {
-                    for token in &rest {
-                        for ch in token.chars() {
-                            if ch.is_ascii_alphabetic() {
-                                game.toggle_scratch(ch);
-                            }
+            // Jotto only: Wordle has no scratch pad, so there it's an unknown command.
+            ":scratch" | "scratch" if mode == GameMode::Jotto => {
+                for token in &rest {
+                    for ch in token.chars() {
+                        if ch.is_ascii_alphabetic() {
+                            game.toggle_scratch(ch);
                         }
                     }
-                    print_scratch(&game, use_color);
                 }
+                print_scratch(&game, use_color);
                 continue;
             }
             ":giveup" | "giveup" => {

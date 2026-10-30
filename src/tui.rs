@@ -21,6 +21,7 @@ use crate::dict;
 use crate::game::{
     supports_color, GameMode, GameState, GameStatus, LetterState, ScratchState, MAX_WORDLE_GUESSES,
 };
+use crate::save::{Autosave, Notice};
 
 /// Okabe-Ito colorblind-safe palette
 pub(crate) const COLOR_ACCENT: Color = Color::Rgb(86, 180, 233); // Sky Blue (#56B4E9)
@@ -645,17 +646,32 @@ impl Drop for TerminalGuard {
 }
 
 /// Runs the full-screen interactive TUI.
-pub fn run(game: GameState) -> io::Result<()> {
+pub fn run(game: GameState, autosave: &mut Autosave) -> io::Result<()> {
+    let mut app = TuiApp::new(game);
+    if let Some(notice) = autosave.notice.take() {
+        app.message = Some((notice.text().to_string(), notice_color(&notice)));
+    }
     let (_guard, mut terminal) = enter_tui()?;
-    run_event_loop(&mut terminal, &mut TuiApp::new(game))
+    run_event_loop(&mut terminal, &mut app, autosave)
+}
+
+/// Colour of the status line telling the player about their save.
+pub(crate) fn notice_color(notice: &Notice) -> Color {
+    match notice {
+        Notice::Resumed(_) => COLOR_ACCENT,
+        Notice::Problem(_) => COLOR_WARNING,
+    }
 }
 
 fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut TuiApp,
+    autosave: &mut Autosave,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|f| draw_ui(f, app))?;
+        // Every key and click comes back here, so this saves each change.
+        autosave.sync(&app.game.to_saved());
 
         if app.should_quit {
             return Ok(());

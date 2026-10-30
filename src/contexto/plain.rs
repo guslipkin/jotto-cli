@@ -7,6 +7,7 @@ use crate::contexto::game::{
 };
 use crate::contexto::tui::closeness_color;
 use crate::game::supports_color;
+use crate::save::Autosave;
 use crate::tui::ansi_rgb;
 
 /// Closest guesses shown after each guess (`:history` shows them all).
@@ -16,7 +17,7 @@ const BAR_WIDTH: usize = 20;
 const NEAREST_SHOWN: usize = 15;
 
 /// Runs the line-by-line REPL / Plain CLI mode.
-pub fn run(mut game: ContextoGame) -> io::Result<()> {
+pub fn run(mut game: ContextoGame, autosave: &mut Autosave) -> io::Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let use_color = supports_color();
@@ -39,9 +40,17 @@ pub fn run(mut game: ContextoGame) -> io::Result<()> {
         "Guess the secret word. Each guess is ranked by how close its meaning is (1 = the word)."
     );
     println!("Type a word, or ':help' for commands.");
+    if let Some(notice) = autosave.notice.take() {
+        println!("{}", notice.text());
+        if !game.guesses().is_empty() {
+            print_board(&game, BOARD_ROWS, None, use_color);
+        }
+    }
 
     let mut lines = stdin.lock().lines();
     loop {
+        // Every command and guess comes back here, so this saves each change.
+        autosave.sync(&game.to_saved());
         print!("contexto> ");
         stdout.flush()?;
 

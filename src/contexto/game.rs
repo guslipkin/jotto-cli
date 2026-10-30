@@ -3,10 +3,12 @@ use std::fmt;
 use std::str::FromStr;
 
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 
 use crate::contexto::data::{lexicon, Ranking};
 use crate::dict;
 use crate::game::sanitize_input;
+use crate::save::{self, enum_name, parse_enum, Loaded, Notice, Saveable, SAVE_VERSION};
 
 /// How abstract the secret word may be. Each level's pool includes the easier ones'.
 /// Tiers come from WordNet's category for the word's most common sense
@@ -277,6 +279,38 @@ pub enum Status {
     GivenUp,
 }
 
+/// A `contexto` save file (see [`crate::save`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedGame {
+    pub version: u32,
+    /// The unfinished game, if any.
+    pub game: Option<SavedPlay>,
+}
+
+/// An unfinished `contexto` game, replayed on load. Ranks aren't saved: replaying
+/// recomputes them, so a save stays right if the word data changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedPlay {
+    pub difficulty: String,
+    /// Base64 in the file, so opening it doesn't give the answer away.
+    #[serde(with = "save::encoded")]
+    pub secret: String,
+    pub daily_date: Option<String>,
+    /// Guesses and hints in the order they were made.
+    pub moves: Vec<SavedMove>,
+}
+
+/// One guess or hint in a [`SavedPlay`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedMove {
+    pub word: String,
+    /// What was typed, for an inflection ("mice" for "mouse").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typed: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hint: bool,
+}
+
 /// State machine for one `contexto` session.
 #[derive(Debug, Clone)]
 pub struct ContextoGame {
@@ -519,10 +553,92 @@ impl ContextoGame {
         Ok(guess)
     }
 
+    /// Starts a game from the command line's choices and the player's save (see
+    /// [`save::start`]).
+    pub fn start(
+        difficulty: Option<Difficulty>,
+        daily: bool,
+        word: Option<&str>,
+        loaded: Loaded<SavedGame>,
+    ) -> Result<(Self, Option<Notice>), GuessError> {
+        let asked_for_game = difficulty.is_some() || daily || word.is_some();
+        save::start(loaded, asked_for_game, Self::from_saved, || {
+            if daily {
+                Ok(Self::new_daily())
+            } else {
+                Self::new(difficulty.unwrap_or_default(), word)
+            }
+        })
+    }
+
+    /// What to save: the game while it's being played, otherwise nothing.
+    pub fn to_saved(&self) -> SavedGame {
+        let game = (self.status == Status::Playing).then(|| SavedPlay {
+            difficulty: enum_name(self.difficulty),
+            secret: self.secret_word().to_string(),
+            daily_date: self.daily_date.clone(),
+            moves: self
+                .guesses
+                .iter()
+                .map(|g| SavedMove {
+                    word: g.word.clone(),
+                    typed: g.typed.clone(),
+                    hint: g.hint,
+                })
+                .collect(),
+        });
+        SavedGame {
+            version: SAVE_VERSION,
+            game,
+        }
+    }
+
+    /// Rebuilds a saved unfinished game by replaying its guesses and hints (`None`
+    /// when the save has no game in progress).
+    pub fn from_saved(saved: &SavedGame) -> Result<Option<Self>, String> {
+        let Some(play) = &saved.game else {
+            return Ok(None);
+        };
+        let difficulty = parse_enum(&play.difficulty)
+            .ok_or_else(|| format!("unknown difficulty '{}'", play.difficulty))?;
+        let mut game = Self::new(difficulty, Some(&play.secret))
+            .map_err(|_| format!("its word '{}' is no longer in the word list", play.secret))?;
+        game.daily_date = play.daily_date.clone();
+        let lex = lexicon();
+        for m in &play.moves {
+            let gone = || format!("'{}' is no longer in the word list", m.word);
+            if m.hint {
+                // The hint itself, not a fresh one: hints depend on the guesses
+                // around them, and the player saw this word.
+                let idx = lex.index_of(&m.word).ok_or_else(gone)?;
+                game.guesses.push(Guess {
+                    number: game.guesses.len() + 1,
+                    word: m.word.clone(),
+                    typed: None,
+                    rank: game.ranking.rank_of(idx),
+                    hint: true,
+                });
+            } else {
+                game.make_guess(m.typed.as_deref().unwrap_or(&m.word))
+                    .map_err(|_| gone())?;
+            }
+        }
+        if game.status != Status::Playing {
+            return Err("its guesses already finish it".to_string());
+        }
+        Ok(Some(game))
+    }
+
     /// Ends the game and reveals the secret.
     pub fn give_up(&mut self) {
         if self.status == Status::Playing {
             self.status = Status::GivenUp;
         }
+    }
+}
+
+impl Saveable for ContextoGame {
+    fn daily_date(&self) -> Option<&str> {
+        self.daily_date.as_deref()
     }
 }
