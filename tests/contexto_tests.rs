@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
-use jotto::concepts::data::lexicon;
-use jotto::concepts::game::{
-    ConceptsGame, Difficulty, GuessError, HintError, Status, DAILY_DIFFICULTY, FIRST_HINT_RANK,
+use jotto::contexto::data::lexicon;
+use jotto::contexto::game::{
+    ContextoGame, Difficulty, GuessError, HintError, Status, DAILY_DIFFICULTY, FIRST_HINT_RANK,
 };
 use jotto::dict::DAILY_EPOCH_DAY;
 
@@ -126,7 +126,7 @@ fn test_guess_only_words_share_a_ranked_words_rank() {
         }
     }
     // Hints and the closest-words list only ever show ranked words.
-    let game = ConceptsGame::new(Difficulty::Medium, Some("ocean")).unwrap();
+    let game = ContextoGame::new(Difficulty::Medium, Some("ocean")).unwrap();
     for w in game.nearest(500) {
         assert!(
             lex.is_ranked(lex.index_of(w).unwrap()),
@@ -140,7 +140,7 @@ fn test_guess_only_words_share_a_ranked_words_rank() {
 
 #[test]
 fn test_guessing_inflections_duplicates_and_win() {
-    let mut game = ConceptsGame::new(Difficulty::Medium, Some("dog")).unwrap();
+    let mut game = ContextoGame::new(Difficulty::Medium, Some("dog")).unwrap();
     assert_eq!(game.status(), Status::Playing);
 
     let first = game.make_guess("  Cats ").unwrap();
@@ -179,7 +179,7 @@ fn test_guessing_inflections_duplicates_and_win() {
 #[test]
 fn test_hints_halve_best_guess_not_earlier_hints() {
     let lex = lexicon();
-    let mut game = ConceptsGame::new(Difficulty::Medium, Some("dog")).unwrap();
+    let mut game = ContextoGame::new(Difficulty::Medium, Some("dog")).unwrap();
     let ranking = lex.rank_against(lex.index_of("dog").unwrap());
 
     // Before any guess: the word at FIRST_HINT_RANK, then nothing until a guess.
@@ -205,7 +205,7 @@ fn test_hints_halve_best_guess_not_earlier_hints() {
 
     // A best guess of #2 leaves nothing between it and the answer.
     let second = lex.word(ranking.word_at(2));
-    let mut game = ConceptsGame::new(Difficulty::Medium, Some("dog")).unwrap();
+    let mut game = ContextoGame::new(Difficulty::Medium, Some("dog")).unwrap();
     game.make_guess(second).unwrap();
     assert_eq!(game.hint(), Err(HintError::NoneCloser));
 
@@ -216,7 +216,7 @@ fn test_hints_halve_best_guess_not_earlier_hints() {
 
 #[test]
 fn test_give_up_and_reset() {
-    let mut game = ConceptsGame::new(Difficulty::Medium, Some("ocean")).unwrap();
+    let mut game = ContextoGame::new(Difficulty::Medium, Some("ocean")).unwrap();
     game.make_guess("sea").unwrap();
     game.give_up();
     assert_eq!(game.status(), Status::GivenUp);
@@ -230,7 +230,7 @@ fn test_give_up_and_reset() {
     let tier = lexicon().secret_tier(lexicon().index_of(game.secret_word()).unwrap());
     assert!(tier.is_some_and(|t| t <= Difficulty::Medium.max_tier()));
 
-    assert!(ConceptsGame::new(Difficulty::Medium, Some("notaword")).is_err());
+    assert!(ContextoGame::new(Difficulty::Medium, Some("notaword")).is_err());
 }
 
 #[test]
@@ -256,10 +256,10 @@ fn test_daily_is_deterministic_and_cycles_without_repeats() {
     );
 
     // Daily is always at DAILY_DIFFICULTY, whatever level was being played.
-    let mut game = ConceptsGame::new(Difficulty::Hard, None).unwrap();
+    let mut game = ContextoGame::new(Difficulty::Hard, None).unwrap();
     game.start_daily();
     assert_eq!(game.difficulty(), DAILY_DIFFICULTY);
-    let daily = ConceptsGame::new_daily();
+    let daily = ContextoGame::new_daily();
     assert!(daily.daily_date().is_some());
     assert_eq!(daily.secret_word(), game.secret_word());
     let idx = lex.index_of(daily.secret_word()).unwrap();
@@ -289,7 +289,7 @@ fn test_difficulty_pools_nest_and_sort_concrete_first() {
     }
 
     // Each level's random secrets come from its own pool; changing level restarts.
-    let mut game = ConceptsGame::new(Difficulty::Easy, None).unwrap();
+    let mut game = ContextoGame::new(Difficulty::Easy, None).unwrap();
     for _ in 0..50 {
         assert_eq!(tier(game.secret_word()), Some(1));
         game.reset(None);

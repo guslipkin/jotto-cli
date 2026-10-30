@@ -1,5 +1,5 @@
-# Left out of concepts: names, places and brands. Written by
-# scripts/build-concepts-data.py --cased-vocab (its docstring says how);
+# Left out of contexto: names, places and brands. Written by
+# scripts/build-contexto-data.py --cased-vocab (its docstring says how);
 # edit PROPER_NOUN_KEEP / PROPER_NOUN_DROP there rather than this file.
 abigail
 accra

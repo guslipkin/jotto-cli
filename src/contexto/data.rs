@@ -3,16 +3,16 @@ use std::sync::OnceLock;
 
 use crate::dict::DAILY_EPOCH_DAY;
 
-/// Word lists and int8 meaning vectors written by `scripts/build-concepts-data.py`
+/// Word lists and int8 meaning vectors written by `scripts/build-contexto-data.py`
 /// (see its docstring for the layout). Committed rather than built by `build.rs`,
 /// since the GloVe vectors it comes from are an 822 MB download.
-static DATA: &[u8] = include_bytes!("../../data/concepts.bin");
+static DATA: &[u8] = include_bytes!("../../data/contexto.bin");
 
-const MAGIC: &[u8; 4] = b"CNCP";
+const MAGIC: &[u8; 4] = b"CTXO";
 const FORMAT_VERSION: u8 = 2;
 
 /// Fixed seed for the daily order, so every copy of the same build agrees on each day's word.
-const DAILY_SEED: u64 = 0x434F_4E43_4550_5453; // "CONCEPTS"
+const DAILY_SEED: u64 = 0x434F_4E54_4558_544F; // "CONTEXTO"
 
 /// The embedded word list: every guessable word, the inflections that map onto them,
 /// the secret-word pool, and one meaning vector per guessable word.
@@ -41,7 +41,7 @@ pub fn lexicon() -> &'static Lexicon {
 fn read_blob(data: &'static [u8], pos: &mut usize) -> Vec<&'static str> {
     let len = u32::from_le_bytes(data[*pos..*pos + 4].try_into().expect("4 bytes")) as usize;
     *pos += 4;
-    let text = std::str::from_utf8(&data[*pos..*pos + len]).expect("concepts.bin text is ASCII");
+    let text = std::str::from_utf8(&data[*pos..*pos + len]).expect("contexto.bin text is ASCII");
     *pos += len;
     if text.is_empty() {
         Vec::new()
@@ -52,10 +52,10 @@ fn read_blob(data: &'static [u8], pos: &mut usize) -> Vec<&'static str> {
 
 impl Lexicon {
     fn parse(data: &'static [u8]) -> Self {
-        assert_eq!(&data[..4], MAGIC, "concepts.bin has the wrong magic number");
+        assert_eq!(&data[..4], MAGIC, "contexto.bin has the wrong magic number");
         assert_eq!(
             data[4], FORMAT_VERSION,
-            "concepts.bin has an unknown format version"
+            "contexto.bin has an unknown format version"
         );
         let dim = u16::from_le_bytes([data[6], data[7]]) as usize;
         let mut pos = 8;
@@ -72,13 +72,13 @@ impl Lexicon {
         assert_eq!(
             vectors.len(),
             words.len() * dim,
-            "concepts.bin vector section doesn't match its word count"
+            "contexto.bin vector section doesn't match its word count"
         );
 
         let index = |w: &str| {
             words
                 .binary_search(&w)
-                .unwrap_or_else(|_| panic!("concepts.bin names unknown word '{w}'"))
+                .unwrap_or_else(|_| panic!("contexto.bin names unknown word '{w}'"))
         };
         let aliases = alias_lines
             .iter()

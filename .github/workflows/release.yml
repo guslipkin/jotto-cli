@@ -94,11 +94,11 @@ jobs:
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/jotto" "dist/jotto-${{ matrix.asset_name }}"
           cp "target/${{ matrix.target }}/release/wordle" "dist/wordle-${{ matrix.asset_name }}"
-          cp "target/${{ matrix.target }}/release/concepts" "dist/concepts-${{ matrix.asset_name }}"
-          chmod +x "dist/jotto-${{ matrix.asset_name }}" "dist/wordle-${{ matrix.asset_name }}" "dist/concepts-${{ matrix.asset_name }}"
+          cp "target/${{ matrix.target }}/release/contexto" "dist/contexto-${{ matrix.asset_name }}"
+          chmod +x "dist/jotto-${{ matrix.asset_name }}" "dist/wordle-${{ matrix.asset_name }}" "dist/contexto-${{ matrix.asset_name }}"
           staging="jotto-${{ matrix.asset_name }}"
           mkdir -p "$staging"
-          cp "target/${{ matrix.target }}/release/jotto" "target/${{ matrix.target }}/release/wordle" "target/${{ matrix.target }}/release/concepts" "$staging/"
+          cp "target/${{ matrix.target }}/release/jotto" "target/${{ matrix.target }}/release/wordle" "target/${{ matrix.target }}/release/contexto" "$staging/"
           cp README.md LICENSE LICENSE.SCOWL "$staging/"
           tar -czf "dist/jotto-${{ matrix.asset_name }}.tar.gz" "$staging"
 
@@ -109,10 +109,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/jotto.exe" "dist/jotto-${{ matrix.asset_name }}.exe"
           Copy-Item "target/${{ matrix.target }}/release/wordle.exe" "dist/wordle-${{ matrix.asset_name }}.exe"
-          Copy-Item "target/${{ matrix.target }}/release/concepts.exe" "dist/concepts-${{ matrix.asset_name }}.exe"
+          Copy-Item "target/${{ matrix.target }}/release/contexto.exe" "dist/contexto-${{ matrix.asset_name }}.exe"
           $staging = "jotto-${{ matrix.asset_name }}"
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/jotto.exe", "target/${{ matrix.target }}/release/wordle.exe", "target/${{ matrix.target }}/release/concepts.exe" "$staging/"
+          Copy-Item "target/${{ matrix.target }}/release/jotto.exe", "target/${{ matrix.target }}/release/wordle.exe", "target/${{ matrix.target }}/release/contexto.exe" "$staging/"
           Copy-Item README.md, LICENSE, LICENSE.SCOWL "$staging/"
           Compress-Archive -Path "$staging/*" -DestinationPath "dist/jotto-${{ matrix.asset_name }}.zip"
 

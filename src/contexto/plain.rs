@@ -1,9 +1,9 @@
 use std::io::{self, BufRead, Write};
 use std::str::FromStr;
 
-use crate::concepts::data::lexicon;
-use crate::concepts::game::{
-    bar_fraction, grouped, Closeness, ConceptsGame, Difficulty, Guess, HintError, Status,
+use crate::contexto::data::lexicon;
+use crate::contexto::game::{
+    bar_fraction, grouped, Closeness, ContextoGame, Difficulty, Guess, HintError, Status,
 };
 use crate::game::supports_color;
 
@@ -14,7 +14,7 @@ const BAR_WIDTH: usize = 20;
 const NEAREST_SHOWN: usize = 15;
 
 /// Runs the line-by-line REPL / Plain CLI mode.
-pub fn run(mut game: ConceptsGame) -> io::Result<()> {
+pub fn run(mut game: ContextoGame) -> io::Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let use_color = supports_color();
@@ -22,13 +22,13 @@ pub fn run(mut game: ConceptsGame) -> io::Result<()> {
 
     if let Some(date) = game.daily_date() {
         println!(
-            "=== CONCEPTS [DAILY {date} UTC] === (Difficulty: {} | {} words)",
+            "=== CONTEXTO [DAILY {date} UTC] === (Difficulty: {} | {} words)",
             game.difficulty(),
             grouped(lex.guessable_count())
         );
     } else {
         println!(
-            "=== CONCEPTS === (Difficulty: {} | {} words)",
+            "=== CONTEXTO === (Difficulty: {} | {} words)",
             game.difficulty(),
             grouped(lex.guessable_count())
         );
@@ -40,7 +40,7 @@ pub fn run(mut game: ConceptsGame) -> io::Result<()> {
 
     let mut lines = stdin.lock().lines();
     loop {
-        print!("concepts> ");
+        print!("contexto> ");
         stdout.flush()?;
 
         let Some(line_res) = lines.next() else {
@@ -189,7 +189,7 @@ pub fn run(mut game: ConceptsGame) -> io::Result<()> {
     Ok(())
 }
 
-fn hints_suffix(game: &ConceptsGame) -> String {
+fn hints_suffix(game: &ContextoGame) -> String {
     match game.hint_count() {
         0 => String::new(),
         1 => " and 1 hint".to_string(),
@@ -225,7 +225,7 @@ fn format_row(g: &Guess, use_color: bool) -> String {
 }
 
 /// Prints the `limit` closest guesses, plus the latest guess if it isn't among them.
-fn print_board(game: &ConceptsGame, limit: usize, latest: Option<usize>, use_color: bool) {
+fn print_board(game: &ContextoGame, limit: usize, latest: Option<usize>, use_color: bool) {
     println!();
     if game.guesses().is_empty() {
         println!("No guesses yet.");
@@ -257,7 +257,7 @@ fn print_board(game: &ConceptsGame, limit: usize, latest: Option<usize>, use_col
     println!();
 }
 
-fn print_nearest(game: &ConceptsGame) {
+fn print_nearest(game: &ContextoGame) {
     println!(
         "Closest words to {}: {}",
         game.secret_word().to_ascii_uppercase(),
@@ -268,7 +268,7 @@ fn print_nearest(game: &ConceptsGame) {
 fn print_help() {
     let lex = lexicon();
     println!();
-    println!("Concepts is a game where you find a secret word by its meaning:");
+    println!("Contexto is a game where you find a secret word by its meaning:");
     println!("  - The secret word is a common noun");
     println!(
         "  - {} words are accepted; each guess is ranked by closeness out of {} (#1 is the word)",
@@ -304,13 +304,13 @@ fn print_help() {
     println!("  :difficulty [level]  Show or change difficulty");
     println!("  :giveup              Reveal the secret word");
     println!("  :credits             Show credits");
-    println!("  :quit                Exit CONCEPTS");
+    println!("  :quit                Exit CONTEXTO");
     println!();
 }
 
 fn print_credits() {
     println!();
-    println!("CONCEPTS CLI was written by Gus Lipkin (https://guslipkin.me).");
+    println!("CONTEXTO CLI was written by Gus Lipkin (https://guslipkin.me).");
     println!("It's inspired by Contexto: play the original at https://contexto.me/");
     println!("The word list comes from SCOWL (http://wordlist.aspell.net/).");
     println!("Difficulty levels come from WordNet 3.0's noun categories (https://wordnet.princeton.edu/), Princeton University.");

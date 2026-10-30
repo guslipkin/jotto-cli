@@ -4,13 +4,13 @@ use std::str::FromStr;
 
 use clap::ValueEnum;
 
-use crate::concepts::data::{lexicon, Ranking};
+use crate::contexto::data::{lexicon, Ranking};
 use crate::dict;
 use crate::game::sanitize_input;
 
 /// How abstract the secret word may be. Each level's pool includes the easier ones'.
 /// Tiers come from WordNet's category for the word's most common sense
-/// (`scripts/build-concepts-data.py` says why not word frequency).
+/// (`scripts/build-contexto-data.py` says why not word frequency).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum Difficulty {
     /// Things you can point at: objects, people, animals, food, places
@@ -167,7 +167,7 @@ impl fmt::Display for GuessError {
 
 impl std::error::Error for GuessError {}
 
-/// Why [`ConceptsGame::hint`] gave no hint.
+/// Why [`ContextoGame::hint`] gave no hint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HintError {
     GameOver,
@@ -213,7 +213,7 @@ pub struct Guess {
     pub hint: bool,
 }
 
-/// Result of [`ConceptsGame::make_guess`].
+/// Result of [`ContextoGame::make_guess`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuessOutcome {
     pub guess: Guess,
@@ -229,9 +229,9 @@ pub enum Status {
     GivenUp,
 }
 
-/// State machine for one `concepts` session.
+/// State machine for one `contexto` session.
 #[derive(Debug, Clone)]
-pub struct ConceptsGame {
+pub struct ContextoGame {
     secret: usize,
     ranking: Ranking,
     difficulty: Difficulty,
@@ -241,7 +241,7 @@ pub struct ConceptsGame {
     status: Status,
 }
 
-impl ConceptsGame {
+impl ContextoGame {
     /// A game at `difficulty` with a random secret, or `custom_word` if given
     /// (any guessable word).
     pub fn new(difficulty: Difficulty, custom_word: Option<&str>) -> Result<Self, GuessError> {

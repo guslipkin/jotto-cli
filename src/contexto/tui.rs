@@ -16,9 +16,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{Frame, Terminal};
 
-use crate::concepts::data::lexicon;
-use crate::concepts::game::{
-    bar_fraction, grouped, Closeness, ConceptsGame, Difficulty, Guess, Status,
+use crate::contexto::data::lexicon;
+use crate::contexto::game::{
+    bar_fraction, grouped, Closeness, ContextoGame, Difficulty, Guess, Status,
 };
 use crate::game::supports_color;
 use crate::tui::{
@@ -60,8 +60,8 @@ const FOOTER_ACTIONS: [(FooterAction, &str, &str); FOOTER_COUNT] = [
     (FooterAction::Quit, "[Esc]", "Quit"),
 ];
 
-struct ConceptsApp {
-    game: ConceptsGame,
+struct ContextoApp {
+    game: ContextoGame,
     use_color: bool,
     input: String,
     footer_buttons: [Rect; FOOTER_COUNT],
@@ -73,8 +73,8 @@ struct ConceptsApp {
     table_state: TableState,
 }
 
-impl ConceptsApp {
-    fn new(game: ConceptsGame) -> Self {
+impl ContextoApp {
+    fn new(game: ContextoGame) -> Self {
         let message = match game.daily_date() {
             Some(date) => (
                 format!("Daily Challenge ({date} UTC) started!"),
@@ -271,7 +271,7 @@ impl ConceptsApp {
     }
 }
 
-fn hints_suffix(game: &ConceptsGame) -> String {
+fn hints_suffix(game: &ContextoGame) -> String {
     match game.hint_count() {
         0 => String::new(),
         1 => " and 1 hint".to_string(),
@@ -334,7 +334,7 @@ fn guess_label(g: &Guess) -> String {
 }
 
 /// Runs the full-screen interactive TUI.
-pub fn run(game: ConceptsGame) -> io::Result<()> {
+pub fn run(game: ContextoGame) -> io::Result<()> {
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
@@ -348,7 +348,7 @@ pub fn run(game: ConceptsGame) -> io::Result<()> {
     let _guard = TerminalGuard;
 
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-    let mut app = ConceptsApp::new(game);
+    let mut app = ContextoApp::new(game);
     let res = run_event_loop(&mut terminal, &mut app);
     let _ = terminal.show_cursor();
     res
@@ -356,7 +356,7 @@ pub fn run(game: ConceptsGame) -> io::Result<()> {
 
 fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut ConceptsApp,
+    app: &mut ContextoApp,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|f| draw_ui(f, app))?;
@@ -420,8 +420,8 @@ fn run_event_loop(
     }
 }
 
-fn draw_ui(f: &mut Frame, app: &mut ConceptsApp) {
-    let title = " CONCEPTS ";
+fn draw_ui(f: &mut Frame, app: &mut ContextoApp) {
+    let title = " CONTEXTO ";
 
     if f.area().width < MIN_RECOMMENDED_WIDTH {
         app.footer_buttons = [Rect::default(); FOOTER_COUNT];
@@ -438,7 +438,7 @@ fn draw_ui(f: &mut Frame, app: &mut ConceptsApp) {
                 "Current width: {} columns (minimum recommended: {MIN_RECOMMENDED_WIDTH} columns).",
                 f.area().width
             )),
-            Line::from("Please widen your terminal window, or run `concepts --plain`."),
+            Line::from("Please widen your terminal window, or run `contexto --plain`."),
             Line::from(""),
             Line::from(Span::styled(
                 "Press [Esc] or [Ctrl+C] to quit.",
@@ -737,7 +737,7 @@ fn draw_help(f: &mut Frame, use_color: bool) {
         Line::from(spans)
     };
     let help = vec![
-        Line::from(Span::styled("How to Play Concepts", heading)),
+        Line::from(Span::styled("How to Play Contexto", heading)),
         Line::from("Find the secret noun by its meaning. Guesses are unlimited."),
         Line::from(format!(
             "  • {} words accepted, ranked out of {}; #1 is the answer.",
@@ -783,7 +783,7 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
 
-    fn render(app: &mut ConceptsApp, width: u16, height: u16) -> String {
+    fn render(app: &mut ContextoApp, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| draw_ui(f, app)).unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -793,8 +793,8 @@ mod tests {
             .join("\n")
     }
 
-    fn app_with_guesses(word: &str, guesses: &[&str]) -> ConceptsApp {
-        let mut app = ConceptsApp::new(ConceptsGame::new(Difficulty::Medium, Some(word)).unwrap());
+    fn app_with_guesses(word: &str, guesses: &[&str]) -> ContextoApp {
+        let mut app = ContextoApp::new(ContextoGame::new(Difficulty::Medium, Some(word)).unwrap());
         for g in guesses {
             app.input = g.to_string();
             app.submit_input();
@@ -807,10 +807,10 @@ mod tests {
         let mut app = app_with_guesses("dog", &["animal", "mice", "horse"]);
         app.take_hint();
         let screen = render(&mut app, 100, 30);
-        if std::env::var_os("CONCEPTS_SHOW_TUI").is_some() {
+        if std::env::var_os("CONTEXTO_SHOW_TUI").is_some() {
             println!("{screen}");
         }
-        assert!(screen.contains("CONCEPTS"));
+        assert!(screen.contains("CONTEXTO"));
         assert!(screen.contains("Guesses: 3"));
         assert!(screen.contains("Hints: 1"));
         assert!(screen.contains("MOUSE (mice)"));
@@ -829,7 +829,7 @@ mod tests {
         let mut app = app_with_guesses("dog", &[]);
         app.show_help = true;
         let screen = render(&mut app, 80, 24);
-        if std::env::var_os("CONCEPTS_SHOW_TUI").is_some() {
+        if std::env::var_os("CONTEXTO_SHOW_TUI").is_some() {
             println!("{screen}");
         }
         for text in ["How to Play", "Hard: adds ideas", "WordNet", "to close"] {

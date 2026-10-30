@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Build data/concepts.bin, the word list and meaning vectors `concepts` embeds.
+"""Build data/contexto.bin, the word list and meaning vectors `contexto` embeds.
 
 Run by hand when the word lists or vectors should change, not from build.rs:
 GloVe's archive is 822 MB, far too much to fetch on every build, while the
 result is under 20 MB and is committed.
 
-    python3 scripts/build-concepts-data.py \
+    python3 scripts/build-contexto-data.py \
         --scowl-db target/release/build/jotto-*/out/wordlist/scowl.db \
         --glove glove.6B.300d.txt \
         --wordnet wordnet
@@ -28,7 +28,7 @@ tried first and backfires: GloVe's most frequent nouns are abstract news words
 number is written, none of WordNet itself.
 
 Names, places and brands ("amazon", "google", "colin", "paris") are left out of
-the game entirely, listed in data/concepts-proper-nouns.txt. GloVe 6B is
+the game entirely, listed in data/contexto-proper-nouns.txt. GloVe 6B is
 lowercased, so the list comes from a cased vocabulary: with `--cased-vocab`
 (the first column of GloVe 840B's glove.840B.300d.txt, from the same pages; a
 2 GB download, so only needed to refresh the list), a word is a proper noun
@@ -44,7 +44,7 @@ and PROPER_NOUN_DROP correct the cases no rule gets right.
 them, from the quantized vectors just written, to check a change's effect.
 
 File format (little-endian):
-    b"CNCP", u8 version, u8 reserved, u16 dim,
+    b"CTXO", u8 version, u8 reserved, u16 dim,
     u32 length + newline-separated sorted guessable words,
     u32 length + newline-separated "form lemma" aliases sorted by form,
     u32 length + newline-separated "word tier" secret words (tier 1 easy,
@@ -293,7 +293,7 @@ PROPER_NOUN_DROP = {
     "john", "ken", "maria", "matt", "mike", "morocco", "sanger", "waldo",
 }
 
-DEFAULT_PROPER_NOUNS = Path(__file__).resolve().parent.parent / "data" / "concepts-proper-nouns.txt"
+DEFAULT_PROPER_NOUNS = Path(__file__).resolve().parent.parent / "data" / "contexto-proper-nouns.txt"
 
 
 def parse_args():
@@ -303,7 +303,7 @@ def parse_args():
     p.add_argument("--wordnet", required=True, type=Path, help="WordNet 3.0 dict directory")
     p.add_argument("--cased-vocab", type=Path, help="GloVe 840B (or just its first column): rewrite the proper-noun list")
     p.add_argument("--proper-nouns", type=Path, default=DEFAULT_PROPER_NOUNS)
-    p.add_argument("--out", type=Path, default=Path(__file__).resolve().parent.parent / "data" / "concepts.bin")
+    p.add_argument("--out", type=Path, default=Path(__file__).resolve().parent.parent / "data" / "contexto.bin")
     p.add_argument("--show", nargs="*", default=[], metavar="WORD")
     return p.parse_args()
 
@@ -500,8 +500,8 @@ def main():
             glove, args.cased_vocab, capitalized, wordnet_lowercase_attested(args.wordnet)
         )
         args.proper_nouns.write_text(
-            "# Left out of concepts: names, places and brands. Written by\n"
-            "# scripts/build-concepts-data.py --cased-vocab (its docstring says how);\n"
+            "# Left out of contexto: names, places and brands. Written by\n"
+            "# scripts/build-contexto-data.py --cased-vocab (its docstring says how);\n"
             "# edit PROPER_NOUN_KEEP / PROPER_NOUN_DROP there rather than this file.\n"
             + "".join(f"{w}\n" for w in sorted(proper))
         )
@@ -547,7 +547,7 @@ def main():
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with open(args.out, "wb") as f:
-        f.write(b"CNCP")
+        f.write(b"CTXO")
         f.write(struct.pack("<BBH", FORMAT_VERSION, 0, dim))
         write_blob(f, words)
         write_blob(f, aliases)
