@@ -287,38 +287,19 @@ fn closeness_color(rank: usize) -> Color {
     }
 }
 
-/// A closeness bar `width` cells wide. Without colour, the fill is `#` so it still reads.
+/// A closeness bar `width` cells wide. With colour, the unfilled part is blank, so it
+/// takes the background behind it (gray on the highlighted row). Without colour, the
+/// bar is `#` on `.` so its length still reads.
 fn bar_spans(rank: usize, width: u16, use_color: bool) -> Vec<Span<'static>> {
-    bar_spans_on(rank, width, use_color, false)
-}
-
-/// A closeness bar for a list row. On the highlighted row, whose background is
-/// [`HIGHLIGHT_BG`], the unfilled part is solid black, so the bar still reads as a
-/// bar against the gray rather than fading into it.
-fn bar_spans_on(rank: usize, width: u16, use_color: bool, highlighted: bool) -> Vec<Span<'static>> {
     let width = width as usize;
     let filled = ((bar_fraction(rank) * width as f64).round() as usize).min(width);
-    let (fill, empty) = if !use_color {
-        ("#", ".")
-    } else if highlighted {
-        ("█", "█")
-    } else {
-        ("█", "░")
-    };
-    let empty_color = if use_color && highlighted {
-        Color::Black
-    } else {
-        Color::DarkGray
-    };
+    let (fill, empty) = if use_color { ("█", " ") } else { ("#", ".") };
     vec![
         Span::styled(
             fill.repeat(filled),
             Style::default().fg(closeness_color(rank)),
         ),
-        Span::styled(
-            empty.repeat(width - filled),
-            Style::default().fg(empty_color),
-        ),
+        Span::raw(empty.repeat(width - filled)),
     ]
 }
 
@@ -614,13 +595,11 @@ fn draw_ui(f: &mut Frame, app: &mut ContextoApp) {
     let word_w = (list_inner_w / 2).clamp(12, 26);
     let bar_w = list_inner_w.saturating_sub(rank_w + word_w + 2).max(4);
     let latest = app.latest;
-    let selected = app.table_state.selected();
     let rows: Vec<Row> = app
         .game
         .guesses_by_rank()
         .into_iter()
-        .enumerate()
-        .map(|(i, g)| {
+        .map(|g| {
             let mut word_style = Style::default().fg(Color::White);
             if Some(g.number) == latest {
                 word_style = word_style.add_modifier(Modifier::BOLD);
@@ -632,12 +611,7 @@ fn draw_ui(f: &mut Frame, app: &mut ContextoApp) {
                 Cell::from(format!("#{}", g.rank))
                     .style(Style::default().fg(closeness_color(g.rank))),
                 Cell::from(guess_label(g)).style(word_style),
-                Cell::from(Line::from(bar_spans_on(
-                    g.rank,
-                    bar_w,
-                    app.use_color,
-                    selected == Some(i),
-                ))),
+                Cell::from(Line::from(bar_spans(g.rank, bar_w, app.use_color))),
             ])
         })
         .collect();
@@ -838,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn highlighted_row_keeps_bar_colours_on_gray() {
+    fn highlighted_row_is_gray_through_the_bar() {
         let mut app = app_with_guesses("dog", &["cat", "violin"]);
         app.use_color = true;
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -856,30 +830,24 @@ mod tests {
         };
         // The latest guess (VIOLIN) is the highlighted row; CAT isn't.
         for (y, highlighted) in [(row_of("VIOLIN"), true), (row_of("CAT"), false)] {
-            let bar: Vec<_> = (50..99u16)
-                .map(|x| &buf[(x, y)])
-                .filter(|c| c.symbol() == "█" || c.symbol() == "░")
-                .collect();
-            assert!(!bar.is_empty());
-            let filled = bar
-                .iter()
-                .filter(|c| c.fg != Color::Black && c.symbol() == "█");
-            assert!(filled.count() > 0, "the bar lost its colour");
-            for c in &bar {
-                if highlighted {
-                    assert_eq!(c.bg, HIGHLIGHT_BG);
-                    assert_eq!(c.symbol(), "█");
-                } else {
-                    assert_ne!(c.bg, HIGHLIGHT_BG);
-                }
-            }
-            if highlighted {
-                assert!(
-                    bar.iter().any(|c| c.fg == Color::Black),
-                    "no black unfilled part"
-                );
+            // Columns 81..99 are the bar, between the word column and the border.
+            let bar: Vec<_> = (81..99u16).map(|x| &buf[(x, y)]).collect();
+            let filled: Vec<_> = bar.iter().filter(|c| c.symbol() == "█").collect();
+            assert!(!filled.is_empty(), "the bar has no filled part");
+            assert!(
+                filled.iter().all(|c| c.fg != Color::Reset),
+                "the bar lost its colour"
+            );
+            let empty: Vec<_> = bar.iter().filter(|c| c.symbol() == " ").collect();
+            assert!(!empty.is_empty(), "the bar has no unfilled part");
+            assert_eq!(filled.len() + empty.len(), bar.len());
+            let want_bg = if highlighted {
+                HIGHLIGHT_BG
             } else {
-                assert!(bar.iter().any(|c| c.symbol() == "░"));
+                Color::Reset
+            };
+            for c in &empty {
+                assert_eq!(c.bg, want_bg, "the unfilled part has the wrong background");
             }
         }
     }
