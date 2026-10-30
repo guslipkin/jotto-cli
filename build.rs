@@ -9,7 +9,7 @@ use std::process::Command;
 const RECORD_SIZE: usize = 7;
 
 const SCOWL_REPO_URL: &str = "https://github.com/en-wl/wordlist.git";
-const BUILD_FORMAT_VERSION: &str = "v3-plural-flag";
+const BUILD_FORMAT_VERSION: &str = "v4-plural-flag-fallback-pos";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -218,8 +218,12 @@ fn build_with_rust_fallback(wordlist_dir: &Path, words_bin_path: &Path) {
     ];
 
     let mut words: BTreeMap<[u8; 5], u8> = BTreeMap::new();
-    // 3- and 4-letter words, as stems for spotting plurals without SCOWL's parts of speech.
+    // The Python build's plural sets, read from the entries' part-of-speech tags
+    // ("cost <n>: costs") rather than SCOWL's database: 3-4 letter noun/verb/modifier
+    // head words, plurals and -s forms, and every other head word or inflection.
     let mut stems: HashSet<String> = HashSet::new();
+    let mut s_forms: HashSet<String> = HashSet::new();
+    let mut base_words: HashSet<String> = HashSet::new();
 
     for file_name in files {
         let path = data_dir.join(file_name);
@@ -254,6 +258,35 @@ fn build_with_rust_fallback(wordlist_dir: &Path, words_bin_path: &Path) {
                 .unwrap_or(last_size);
             last_size = size;
 
+            if let Some((head, tag, inflections)) = parse_entry(right) {
+                let pos = tag.split('/').next();
+                let noun_verb_mod = matches!(pos, Some("n" | "v" | "m"));
+                if head != "-" {
+                    if noun_verb_mod
+                        && (3..=4).contains(&head.len())
+                        && head.bytes().all(|b| b.is_ascii_lowercase())
+                    {
+                        stems.insert(head.to_string());
+                    }
+                    base_words.insert(head.to_string());
+                }
+                // Split on list separators only, so a multi-word form ("color
+                // schemes") stays whole and is skipped rather than read as words.
+                for form in inflections
+                    .split([',', '(', ')', '|'])
+                    .map(|t| clean_token(t.trim()))
+                    .filter(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_lowercase()))
+                {
+                    // A noun's inflections are all plurals ("cacti" too); a verb's
+                    // or modifier's are -s forms only when they end in s.
+                    if pos == Some("n") || noun_verb_mod && form.ends_with('s') {
+                        s_forms.insert(form.to_string());
+                    } else {
+                        base_words.insert(form.to_string());
+                    }
+                }
+            }
+
             for token in right.split(|c: char| {
                 c.is_whitespace() || matches!(c, ',' | ':' | ';' | '(' | ')' | '|')
             }) {
@@ -277,11 +310,6 @@ fn build_with_rust_fallback(wordlist_dir: &Path, words_bin_path: &Path) {
                     _ => false,
                 });
 
-                if (3..=4).contains(&trimmed.len())
-                    && trimmed.bytes().all(|b| b.is_ascii_lowercase())
-                {
-                    stems.insert(trimmed.to_string());
-                }
                 if is_five_lowercase_ascii(trimmed) {
                     let mut arr = [0u8; 5];
                     arr.copy_from_slice(trimmed.as_bytes());
@@ -300,15 +328,41 @@ fn build_with_rust_fallback(wordlist_dir: &Path, words_bin_path: &Path) {
         let packed = (*diff & 0x7F) | unique_flag;
         file.write_all(word).expect("Failed to write word");
         let w = std::str::from_utf8(word).expect("ASCII word");
-        let flags = if looks_plural(w, &stems) { 0x01 } else { 0x00 };
+        let s_form_only = s_forms.contains(w) && !base_words.contains(w);
+        let flags = if s_form_only || looks_plural(w, &stems) {
+            0x01
+        } else {
+            0x00
+        };
         file.write_all(&[packed, flags])
             .expect("Failed to write difficulty");
     }
 }
 
+/// Splits an entry's text after its sizes ("A Cv: cost <n> {price}: costs") into the
+/// head word ("-" when it continues the previous one), its tag ("n", "n/place") and
+/// the inflections after the colon that follows the tag, if any. Variant markers
+/// ("A Cv:") before the head and a sense note ("{price}") after the tag are skipped.
+fn parse_entry(right: &str) -> Option<(&str, &str, &str)> {
+    let open = right.find('<')?;
+    let close = open + right[open..].find('>')?;
+    let head = match right[..open].rsplit(':').next().unwrap_or("").trim() {
+        "-" => "-",
+        word => clean_token(word),
+    };
+    let inflections = right[close + 1..].split_once(':').map_or("", |(_, i)| i);
+    Some((head, &right[open + 1..close], inflections))
+}
+
+/// A word without SCOWL's markers: a leading `@` and trailing `-`, `@`, `~` or `!`.
+fn clean_token(token: &str) -> &str {
+    token
+        .trim_start_matches('@')
+        .trim_end_matches(['-', '@', '~', '!'])
+}
+
 /// The suffix half of the Python build's plural test: ends in -s/-es (not
-/// -ss/-us/-is) after a known 3-4 letter stem. Without SCOWL's parts of speech this
-/// also catches some -s verb forms, which Wordle doesn't use as answers either.
+/// -ss/-us/-is) after a known 3-4 letter stem.
 fn looks_plural(word: &str, stems: &HashSet<String>) -> bool {
     if !word.ends_with('s') || word.ends_with("ss") || word.ends_with("us") || word.ends_with("is")
     {

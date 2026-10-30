@@ -6,6 +6,7 @@ use crate::game::{
     supports_color, Difficulty, GameMode, GameState, GameStatus, LetterState, ScratchState,
     MAX_WORDLE_GUESSES,
 };
+use crate::tui::{ansi_rgb, COLOR_NEGATIVE, COLOR_POSITIVE, COLOR_WARNING};
 
 /// Runs the line-by-line REPL / Plain CLI mode for either Jotto or Wordle.
 pub fn run(mut game: GameState) -> io::Result<()> {
@@ -226,8 +227,12 @@ pub fn run(mut game: GameState) -> io::Result<()> {
 fn format_wordle_letter(ch: char, state: LetterState, use_color: bool, padded: bool) -> String {
     if use_color {
         match state {
-            LetterState::Correct => format!("\x1b[1;30;48;2;0;158;115m {ch} \x1b[0m"),
-            LetterState::Present => format!("\x1b[1;30;48;2;230;159;0m {ch} \x1b[0m"),
+            LetterState::Correct => {
+                format!("\x1b[1;30;48;2;{}m {ch} \x1b[0m", ansi_rgb(COLOR_POSITIVE))
+            }
+            LetterState::Present => {
+                format!("\x1b[1;30;48;2;{}m {ch} \x1b[0m", ansi_rgb(COLOR_WARNING))
+            }
             LetterState::Absent => {
                 if padded {
                     format!("\x1b[90;9m {ch} \x1b[0m")
@@ -253,13 +258,15 @@ fn format_scratch_tokens(game: &GameState, use_color: bool) -> Vec<String> {
             let ch = (b'A' + i as u8) as char;
             match (state, use_color) {
                 (ScratchState::Default, _) => None,
-                (ScratchState::ScratchedOut, true) => {
-                    Some(format!("\x1b[1;9;30;48;2;213;94;0m {ch} \x1b[0m"))
-                }
+                (ScratchState::ScratchedOut, true) => Some(format!(
+                    "\x1b[1;9;30;48;2;{}m {ch} \x1b[0m",
+                    ansi_rgb(COLOR_NEGATIVE)
+                )),
                 (ScratchState::ScratchedOut, false) => Some(format!("~{ch}~")),
-                (ScratchState::Positive, true) => {
-                    Some(format!("\x1b[1;30;48;2;0;158;115m {ch} \x1b[0m"))
-                }
+                (ScratchState::Positive, true) => Some(format!(
+                    "\x1b[1;30;48;2;{}m {ch} \x1b[0m",
+                    ansi_rgb(COLOR_POSITIVE)
+                )),
                 (ScratchState::Positive, false) => Some(format!("+{ch}+")),
             }
         })

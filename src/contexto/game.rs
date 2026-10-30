@@ -64,7 +64,7 @@ impl Difficulty {
 
     /// Number of secret words at this level.
     pub fn secret_count(self) -> usize {
-        lexicon().secret_pool(self.max_tier()).len()
+        lexicon().secret_count(self.max_tier())
     }
 }
 
@@ -140,6 +140,16 @@ pub fn bar_fraction(rank: usize) -> f64 {
     (1.0 - (rank.max(1) as f64).ln() / total.ln()).clamp(0.0, 1.0)
 }
 
+/// Number of cells to fill in a closeness bar `width` cells wide for `rank`.
+pub fn bar_filled(rank: usize, width: usize) -> usize {
+    ((bar_fraction(rank) * width as f64).round() as usize).min(width)
+}
+
+/// "1 guess", "3 guesses" and so on.
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 /// Errors returned when a guess can't be scored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuessError {
@@ -177,6 +187,8 @@ pub enum HintError {
     GuessFirst {
         rank: usize,
     },
+    /// The first hint (before any guess) is already out; any guess allows another.
+    FirstHintTaken,
 }
 
 impl fmt::Display for HintError {
@@ -191,6 +203,9 @@ impl fmt::Display for HintError {
             Self::GuessFirst { rank } => write!(
                 f,
                 "You already have the hint for your best guess (#{rank}). Make a closer guess for a new one."
+            ),
+            Self::FirstHintTaken => f.write_str(
+                "You already have the first hint. Make a guess for a new one.",
             ),
         }
     }
@@ -211,6 +226,39 @@ pub struct Guess {
     pub rank: usize,
     /// Whether this came from a hint rather than a guess.
     pub hint: bool,
+}
+
+impl Guess {
+    /// The word as listed: upper case, then what was typed for an inflection and `*`
+    /// for a hint ("MOUSE (mice)", "OCEAN *").
+    pub fn label(&self) -> String {
+        let mut label = self.word.to_ascii_uppercase();
+        if let Some(typed) = &self.typed {
+            label.push_str(&format!(" ({typed})"));
+        }
+        if self.hint {
+            label.push_str(" *");
+        }
+        label
+    }
+
+    /// Reply to guessing this word again.
+    pub fn repeat_message(&self) -> String {
+        format!(
+            "Already guessed '{}' (#{}).",
+            self.word.to_ascii_uppercase(),
+            self.rank
+        )
+    }
+
+    /// Reply to this hint being revealed.
+    pub fn hint_message(&self) -> String {
+        format!(
+            "Hint: '{}' is #{}.",
+            self.word.to_ascii_uppercase(),
+            self.rank
+        )
+    }
 }
 
 /// Result of [`ContextoGame::make_guess`].
@@ -243,13 +291,13 @@ pub struct ContextoGame {
 
 impl ContextoGame {
     /// A game at `difficulty` with a random secret, or `custom_word` if given
-    /// (any guessable word).
+    /// (any guessable word, or an inflection of one).
     pub fn new(difficulty: Difficulty, custom_word: Option<&str>) -> Result<Self, GuessError> {
         let lex = lexicon();
         let secret = match custom_word {
             Some(w) => {
                 let w = sanitize_input(w);
-                lex.index_of(&w).ok_or(GuessError::UnknownWord(w))?
+                lex.resolve(&w).ok_or(GuessError::UnknownWord(w))?
             }
             None => {
                 let pool = lex.secret_pool(difficulty.max_tier());
@@ -264,11 +312,11 @@ impl ContextoGame {
     /// Today's deterministic UTC daily game (always at [`DAILY_DIFFICULTY`]).
     pub fn new_daily() -> Self {
         let day = dict::current_utc_days();
-        Self::with_secret(
-            lexicon().daily_secret(day, DAILY_DIFFICULTY.max_tier()),
-            DAILY_DIFFICULTY,
-            Some(dict::format_utc_date(day)),
-        )
+        let secret = lexicon().daily_secret(day, DAILY_DIFFICULTY.max_tier());
+        let mut game =
+            Self::with_secret(secret, DAILY_DIFFICULTY, Some(dict::format_utc_date(day)));
+        game.played.insert(secret);
+        game
     }
 
     fn with_secret(secret: usize, difficulty: Difficulty, daily_date: Option<String>) -> Self {
@@ -322,10 +370,9 @@ impl ContextoGame {
             self.difficulty = DAILY_DIFFICULTY;
             self.played.clear();
         }
-        self.restart(
-            lexicon().daily_secret(day, DAILY_DIFFICULTY.max_tier()),
-            Some(dict::format_utc_date(day)),
-        );
+        let secret = lexicon().daily_secret(day, DAILY_DIFFICULTY.max_tier());
+        self.played.insert(secret);
+        self.restart(secret, Some(dict::format_utc_date(day)));
     }
 
     /// The current difficulty level.
@@ -367,6 +414,15 @@ impl ContextoGame {
         self.guesses.iter().filter(|g| g.hint).count()
     }
 
+    /// "3 guesses", or "3 guesses and 1 hint" once a hint has been taken.
+    pub fn count_summary(&self) -> String {
+        let guesses = plural(self.guess_count(), "guess", "guesses");
+        match self.hint_count() {
+            0 => guesses,
+            n => format!("{guesses} and {}", plural(n, "hint", "hints")),
+        }
+    }
+
     /// Best (lowest) rank reached so far, hints included.
     pub fn best_rank(&self) -> Option<usize> {
         self.guesses.iter().map(|g| g.rank).min()
@@ -384,7 +440,7 @@ impl ContextoGame {
     /// The `n` words closest to the secret, closest first (the secret itself excluded).
     pub fn nearest(&self, n: usize) -> Vec<&'static str> {
         let lex = lexicon();
-        (2..=(n + 1).min(lex.ranked_count()))
+        (2..=(n + 1).min(self.ranking.rank_count()))
             .map(|r| lex.word(self.ranking.word_at(r)))
             .collect()
     }
@@ -441,14 +497,15 @@ impl ContextoGame {
             return Err(HintError::GameOver);
         }
         let target = match self.best_guess_rank() {
-            None => FIRST_HINT_RANK.min(lexicon().ranked_count()),
+            None => FIRST_HINT_RANK.min(self.ranking.rank_count()),
             Some(best) if best <= 2 => return Err(HintError::NoneCloser),
             Some(best) => (best / 2).max(2),
         };
         let word = lexicon().word(self.ranking.word_at(target));
         if self.guesses.iter().any(|g| g.word == word) {
-            return Err(HintError::GuessFirst {
-                rank: self.best_guess_rank().unwrap_or(target),
+            return Err(match self.best_guess_rank() {
+                Some(rank) => HintError::GuessFirst { rank },
+                None => HintError::FirstHintTaken,
             });
         }
         let guess = Guess {

@@ -1,10 +1,5 @@
 use std::io::{self, IsTerminal};
-use std::panic;
 use std::process;
-
-use crossterm::event::DisableMouseCapture;
-use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
 
 pub mod cli;
 pub mod contexto;
@@ -32,27 +27,25 @@ pub fn run_cli(mode: GameMode) {
         }
     };
 
-    let use_plain = args.plain || !io::stdin().is_terminal() || !io::stdout().is_terminal();
-
-    if use_plain {
-        if let Err(err) = plain::run(game) {
-            eprintln!("Error: {err}");
-            process::exit(1);
-        }
-    } else {
-        install_panic_hook();
-        if let Err(err) = tui::run(game) {
-            eprintln!("Error: {err}");
-            process::exit(1);
-        }
-    }
+    run_frontend(game, args.plain, plain::run, tui::run);
 }
 
-fn install_panic_hook() {
-    let original_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |panic_info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
-        original_hook(panic_info);
-    }));
+/// Runs `game` in plain mode if asked or when either end isn't a terminal (piped
+/// input or output), otherwise in the TUI, and exits with an error message on failure.
+pub(crate) fn run_frontend<G>(
+    game: G,
+    plain: bool,
+    run_plain: fn(G) -> io::Result<()>,
+    run_tui: fn(G) -> io::Result<()>,
+) {
+    let use_plain = plain || !io::stdin().is_terminal() || !io::stdout().is_terminal();
+    let res = if use_plain {
+        run_plain(game)
+    } else {
+        run_tui(game)
+    };
+    if let Err(err) = res {
+        eprintln!("Error: {err}");
+        process::exit(1);
+    }
 }

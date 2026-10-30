@@ -4,7 +4,6 @@
 //! It shares the crate's SCOWL-era helpers (dates, colour detection, input cleanup) but
 //! not jotto's and wordle's game engine or TUI, which are built around 5-letter words.
 
-use std::io::{self, IsTerminal};
 use std::process;
 
 use clap::Parser;
@@ -54,14 +53,5 @@ pub fn run_cli() {
         }
     };
 
-    let use_plain = args.plain || !io::stdin().is_terminal() || !io::stdout().is_terminal();
-    let res = if use_plain {
-        plain::run(game)
-    } else {
-        tui::run(game)
-    };
-    if let Err(err) = res {
-        eprintln!("Error: {err}");
-        process::exit(1);
-    }
+    crate::run_frontend(game, args.plain, plain::run, tui::run);
 }

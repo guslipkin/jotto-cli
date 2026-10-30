@@ -1,13 +1,7 @@
-use std::io::{self, stdout};
-use std::panic;
+use std::io;
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEventKind,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -17,12 +11,10 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 use ratatui::{Frame, Terminal};
 
 use crate::contexto::data::lexicon;
-use crate::contexto::game::{
-    bar_fraction, grouped, Closeness, ContextoGame, Difficulty, Guess, Status,
-};
+use crate::contexto::game::{bar_filled, grouped, Closeness, ContextoGame, Difficulty, Status};
 use crate::game::supports_color;
 use crate::tui::{
-    centered_rect, rect_contains, TerminalGuard, COLOR_ACCENT, COLOR_NEGATIVE, COLOR_POSITIVE,
+    centered_rect, enter_tui, rect_contains, COLOR_ACCENT, COLOR_NEGATIVE, COLOR_POSITIVE,
     COLOR_WARNING, MIN_RECOMMENDED_WIDTH,
 };
 
@@ -121,14 +113,7 @@ impl ContextoApp {
             Ok(outcome) if outcome.duplicate => {
                 let g = outcome.guess;
                 self.select_guess(g.number);
-                self.message = (
-                    format!(
-                        "Already guessed '{}' (#{}).",
-                        g.word.to_ascii_uppercase(),
-                        g.rank
-                    ),
-                    COLOR_WARNING,
-                );
+                self.message = (g.repeat_message(), COLOR_WARNING);
             }
             Ok(outcome) => {
                 let g = outcome.guess;
@@ -136,15 +121,9 @@ impl ContextoApp {
                 if self.game.status() == Status::Won {
                     self.message = (
                         format!(
-                            "You found {} in {} {}{}!\nClosest words: {}\n[^N] New Game",
+                            "You found {} in {}!\nClosest words: {}\n[^N] New Game",
                             self.game.secret_word().to_ascii_uppercase(),
-                            self.game.guess_count(),
-                            if self.game.guess_count() == 1 {
-                                "guess"
-                            } else {
-                                "guesses"
-                            },
-                            hints_suffix(&self.game),
+                            self.game.count_summary(),
                             self.game.nearest(NEAREST_SHOWN).join(", ")
                         ),
                         COLOR_POSITIVE,
@@ -172,10 +151,7 @@ impl ContextoApp {
         match self.game.hint() {
             Ok(g) => {
                 self.select_guess(g.number);
-                self.message = (
-                    format!("Hint: '{}' is #{}.", g.word.to_ascii_uppercase(), g.rank),
-                    COLOR_ACCENT,
-                );
+                self.message = (g.hint_message(), COLOR_ACCENT);
             }
             Err(err) => self.message = (err.to_string(), COLOR_WARNING),
         }
@@ -271,15 +247,8 @@ impl ContextoApp {
     }
 }
 
-fn hints_suffix(game: &ContextoGame) -> String {
-    match game.hint_count() {
-        0 => String::new(),
-        1 => " and 1 hint".to_string(),
-        n => format!(" and {n} hints"),
-    }
-}
-
-fn closeness_color(rank: usize) -> Color {
+/// Colour for a rank's [`Closeness`], shared with plain mode.
+pub(super) fn closeness_color(rank: usize) -> Color {
     match Closeness::of(rank) {
         Closeness::Close => COLOR_POSITIVE,
         Closeness::Warm => COLOR_WARNING,
@@ -292,7 +261,7 @@ fn closeness_color(rank: usize) -> Color {
 /// bar is `#` on `.` so its length still reads.
 fn bar_spans(rank: usize, width: u16, use_color: bool) -> Vec<Span<'static>> {
     let width = width as usize;
-    let filled = ((bar_fraction(rank) * width as f64).round() as usize).min(width);
+    let filled = bar_filled(rank, width);
     let (fill, empty) = if use_color { ("█", " ") } else { ("#", ".") };
     vec![
         Span::styled(
@@ -303,36 +272,10 @@ fn bar_spans(rank: usize, width: u16, use_color: bool) -> Vec<Span<'static>> {
     ]
 }
 
-fn guess_label(g: &Guess) -> String {
-    let mut label = g.word.to_ascii_uppercase();
-    if let Some(typed) = &g.typed {
-        label.push_str(&format!(" ({typed})"));
-    }
-    if g.hint {
-        label.push_str(" *");
-    }
-    label
-}
-
 /// Runs the full-screen interactive TUI.
 pub fn run(game: ContextoGame) -> io::Result<()> {
-    let original_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |panic_info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
-        original_hook(panic_info);
-    }));
-
-    enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let _guard = TerminalGuard;
-
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-    let mut app = ContextoApp::new(game);
-    let res = run_event_loop(&mut terminal, &mut app);
-    let _ = terminal.show_cursor();
-    res
+    let (_guard, mut terminal) = enter_tui()?;
+    run_event_loop(&mut terminal, &mut ContextoApp::new(game))
 }
 
 fn run_event_loop(
@@ -438,7 +381,7 @@ fn draw_ui(f: &mut Frame, app: &mut ContextoApp) {
         return;
     }
 
-    // Footer on one row when every button's "[key] label" fits, else on two (4 + 3).
+    // Footer on one row when every button's "[key] label" fits, else on two (4 + 4).
     let one_row = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Ratio(1, FOOTER_COUNT as u32); FOOTER_COUNT])
@@ -560,7 +503,7 @@ fn draw_ui(f: &mut Frame, app: &mut ContextoApp) {
                             .fg(closeness_color(g.rank))
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(guess_label(g), bold_white),
+                    Span::styled(g.label(), bold_white),
                 ]),
                 Line::from(bar_spans(g.rank, latest_inner.width, app.use_color)),
             ]),
@@ -610,7 +553,7 @@ fn draw_ui(f: &mut Frame, app: &mut ContextoApp) {
             Row::new(vec![
                 Cell::from(format!("#{}", g.rank))
                     .style(Style::default().fg(closeness_color(g.rank))),
-                Cell::from(guess_label(g)).style(word_style),
+                Cell::from(g.label()).style(word_style),
                 Cell::from(Line::from(bar_spans(g.rank, bar_w, app.use_color))),
             ])
         })

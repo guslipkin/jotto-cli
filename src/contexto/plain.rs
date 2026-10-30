@@ -3,9 +3,11 @@ use std::str::FromStr;
 
 use crate::contexto::data::lexicon;
 use crate::contexto::game::{
-    bar_fraction, grouped, Closeness, ContextoGame, Difficulty, Guess, HintError, Status,
+    bar_filled, grouped, ContextoGame, Difficulty, Guess, HintError, Status,
 };
+use crate::contexto::tui::closeness_color;
 use crate::game::supports_color;
+use crate::tui::ansi_rgb;
 
 /// Closest guesses shown after each guess (`:history` shows them all).
 const BOARD_ROWS: usize = 10;
@@ -59,7 +61,7 @@ pub fn run(mut game: ContextoGame) -> io::Result<()> {
             None => (lower.as_str(), None),
         };
         match cmd {
-            ":new" | "new" | ":reset" | "reset" => {
+            ":new" | ":reset" => {
                 match arg.map(Difficulty::from_str).transpose() {
                     Ok(d) => {
                         game.reset(d);
@@ -73,7 +75,7 @@ pub fn run(mut game: ContextoGame) -> io::Result<()> {
                 }
                 continue;
             }
-            ":difficulty" | "difficulty" => {
+            ":difficulty" => {
                 match arg.map(Difficulty::from_str) {
                     Some(Ok(d)) => {
                         game.reset(Some(d));
@@ -95,28 +97,26 @@ pub fn run(mut game: ContextoGame) -> io::Result<()> {
             _ => {}
         }
 
+        // Commands need their colon (bar `?`): every word is a guess, and "exit",
+        // "help", "hint" and the like can be the secret.
         match lower.as_str() {
-            ":quit" | "quit" | ":exit" | "exit" | ":q" => break,
-            ":help" | "help" | "?" => {
+            ":quit" | ":exit" | ":q" => break,
+            ":help" | "?" => {
                 print_help();
                 continue;
             }
-            ":credits" | "credits" => {
+            ":credits" => {
                 print_credits();
                 continue;
             }
-            ":history" | "history" => {
+            ":history" => {
                 print_board(&game, usize::MAX, None, use_color);
                 continue;
             }
-            ":hint" | "hint" => {
+            ":hint" => {
                 match game.hint() {
                     Ok(hint) => {
-                        println!(
-                            "Hint: '{}' is #{}.",
-                            hint.word.to_ascii_uppercase(),
-                            hint.rank
-                        );
+                        println!("{}", hint.hint_message());
                         print_board(&game, BOARD_ROWS, Some(hint.number), use_color);
                     }
                     Err(HintError::GameOver) => {
@@ -126,7 +126,7 @@ pub fn run(mut game: ContextoGame) -> io::Result<()> {
                 }
                 continue;
             }
-            ":giveup" | "giveup" | "give up" => {
+            ":giveup" => {
                 if game.status() != Status::Playing {
                     println!(
                         "The current game is already over. Type ':new' or ':daily' to play again."
@@ -138,7 +138,7 @@ pub fn run(mut game: ContextoGame) -> io::Result<()> {
                 }
                 continue;
             }
-            ":daily" | "daily" => {
+            ":daily" => {
                 game.start_daily();
                 println!(
                     "Daily Challenge ({} UTC) started! Difficulty: {}.",
@@ -158,26 +158,14 @@ pub fn run(mut game: ContextoGame) -> io::Result<()> {
         }
 
         match game.make_guess(&lower) {
-            Ok(outcome) if outcome.duplicate => {
-                println!(
-                    "Already guessed '{}' (#{}).",
-                    outcome.guess.word.to_ascii_uppercase(),
-                    outcome.guess.rank
-                );
-            }
+            Ok(outcome) if outcome.duplicate => println!("{}", outcome.guess.repeat_message()),
             Ok(outcome) => {
                 print_board(&game, BOARD_ROWS, Some(outcome.guess.number), use_color);
                 if game.status() == Status::Won {
                     println!(
-                        "CONGRATULATIONS!!! You found {} in {} {}{}.",
+                        "CONGRATULATIONS!!! You found {} in {}.",
                         game.secret_word().to_ascii_uppercase(),
-                        game.guess_count(),
-                        if game.guess_count() == 1 {
-                            "guess"
-                        } else {
-                            "guesses"
-                        },
-                        hints_suffix(&game)
+                        game.count_summary()
                     );
                     print_nearest(&game);
                 }
@@ -189,39 +177,21 @@ pub fn run(mut game: ContextoGame) -> io::Result<()> {
     Ok(())
 }
 
-fn hints_suffix(game: &ContextoGame) -> String {
-    match game.hint_count() {
-        0 => String::new(),
-        1 => " and 1 hint".to_string(),
-        n => format!(" and {n} hints"),
-    }
-}
-
 /// Formats one board row: rank, word (with what was typed, for an inflection) and a closeness bar.
 fn format_row(g: &Guess, use_color: bool) -> String {
-    let filled = (bar_fraction(g.rank) * BAR_WIDTH as f64).round() as usize;
-    let mut label = g.word.to_ascii_uppercase();
-    if let Some(typed) = &g.typed {
-        label.push_str(&format!(" ({typed})"));
-    }
-    if g.hint {
-        label.push_str(" *");
-    }
+    let filled = bar_filled(g.rank, BAR_WIDTH);
     let bar = if use_color {
-        let rgb = match Closeness::of(g.rank) {
-            Closeness::Close => "0;158;115",
-            Closeness::Warm => "230;159;0",
-            Closeness::Far => "213;94;0",
-        };
+        // Blank past the fill, as in the TUI, so only the coloured part shows.
         format!(
-            "\x1b[38;2;{rgb}m{}\x1b[0m\x1b[90m{}\x1b[0m",
+            "\x1b[38;2;{}m{}\x1b[0m{}",
+            ansi_rgb(closeness_color(g.rank)),
             "█".repeat(filled),
-            "░".repeat(BAR_WIDTH - filled)
+            " ".repeat(BAR_WIDTH - filled)
         )
     } else {
         format!("[{}{}]", "#".repeat(filled), ".".repeat(BAR_WIDTH - filled))
     };
-    format!("{:>6}  {:<24} {bar}", format!("#{}", g.rank), label)
+    format!("{:>6}  {:<24} {bar}", format!("#{}", g.rank), g.label())
 }
 
 /// Prints the `limit` closest guesses, plus the latest guess if it isn't among them.
@@ -238,16 +208,7 @@ fn print_board(game: &ContextoGame, limit: usize, latest: Option<usize>, use_col
         println!();
     }
     let sorted = game.guesses_by_rank();
-    println!(
-        "Closest ({} {}{}):",
-        game.guess_count(),
-        if game.guess_count() == 1 {
-            "guess"
-        } else {
-            "guesses"
-        },
-        hints_suffix(game)
-    );
+    println!("Closest ({}):", game.count_summary());
     for g in sorted.iter().take(limit) {
         println!("{}", format_row(g, use_color));
     }

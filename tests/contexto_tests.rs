@@ -186,7 +186,7 @@ fn test_hints_halve_best_guess_not_earlier_hints() {
     let first = game.hint().unwrap();
     assert!(first.hint);
     assert_eq!(first.rank, FIRST_HINT_RANK);
-    assert!(matches!(game.hint(), Err(HintError::GuessFirst { .. })));
+    assert_eq!(game.hint(), Err(HintError::FirstHintTaken));
     assert_eq!(game.best_guess_rank(), None);
 
     // A guess's hint is at half its rank, and only once.
@@ -231,6 +231,38 @@ fn test_give_up_and_reset() {
     assert!(tier.is_some_and(|t| t <= Difficulty::Medium.max_tier()));
 
     assert!(ContextoGame::new(Difficulty::Medium, Some("notaword")).is_err());
+}
+
+#[test]
+fn test_custom_secret_can_be_guess_only_or_inflected() {
+    let lex = lexicon();
+    // A guess-only secret is still #1, and the closest words start at #2.
+    let mut game = ContextoGame::new(Difficulty::Medium, Some("paintball")).unwrap();
+    assert!(!lex.is_ranked(lex.index_of("paintball").unwrap()));
+    let nearest = game.nearest(3);
+    assert_eq!(nearest.len(), 3);
+    assert!(!nearest.contains(&"paintball"));
+    let closest = game.make_guess(nearest[0]).unwrap().guess;
+    assert_eq!(closest.rank, 2);
+    let win = game.make_guess("paintball").unwrap().guess;
+    assert_eq!(win.rank, 1);
+    assert_eq!(game.status(), Status::Won);
+
+    // An inflection is accepted as a custom word, as it is as a guess.
+    let game = ContextoGame::new(Difficulty::Medium, Some("mice")).unwrap();
+    assert_eq!(game.secret_word(), "mouse");
+}
+
+#[test]
+fn test_count_summary_and_labels() {
+    let mut game = ContextoGame::new(Difficulty::Medium, Some("dog")).unwrap();
+    assert_eq!(game.count_summary(), "0 guesses");
+    let g = game.make_guess("violins").unwrap().guess;
+    assert_eq!(g.label(), "VIOLIN (violins)");
+    assert_eq!(game.count_summary(), "1 guess");
+    let h = game.hint().unwrap();
+    assert_eq!(h.label(), format!("{} *", h.word.to_ascii_uppercase()));
+    assert_eq!(game.count_summary(), "1 guess and 1 hint");
 }
 
 #[test]

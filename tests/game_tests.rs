@@ -89,11 +89,9 @@ fn test_wordle_answers_are_never_plurals_but_plurals_are_guessable() {
             "'{w}' should be guessable"
         );
     }
-    let mut seen = HashSet::new();
     for _ in 0..3000 {
         let (w, _) = dict::random_word_excluding(GameMode::Wordle, 95, &HashSet::new());
         assert!(!plurals.contains(&w), "'{w}' is a plural answer");
-        seen.insert(w);
     }
     let today = dict::current_utc_days();
     for day in today..today + 400 {

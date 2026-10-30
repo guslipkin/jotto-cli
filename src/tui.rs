@@ -1,6 +1,7 @@
 use std::io::{self, stdout};
 use std::panic;
 
+use crossterm::cursor::Show;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseButton, MouseEventKind,
@@ -598,35 +599,55 @@ fn wrapped_line_count(text: &str, max_width: u16) -> u16 {
 /// RAII guard that ensures the terminal is restored on exit or panic unwinding.
 pub(crate) struct TerminalGuard;
 
+/// Switches the terminal to full-screen raw mode for a TUI. It's restored when the
+/// guard drops, and by a panic hook too, so a panic message prints on the normal
+/// screen rather than vanishing with the alternate one.
+pub(crate) fn enter_tui() -> io::Result<(TerminalGuard, Terminal<CrosstermBackend<io::Stdout>>)> {
+    let original_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            Show
+        );
+        original_hook(panic_info);
+    }));
+
+    enable_raw_mode()?;
+    // Made before anything else can fail, so raw mode never outlives an error. It
+    // comes first in the tuple so the terminal drops before it restores the screen.
+    let guard = TerminalGuard;
+    let mut stdout = stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    Ok((guard, Terminal::new(CrosstermBackend::new(stdout))?))
+}
+
+/// A palette colour as an ANSI `r;g;b` triple, for plain mode's escape codes.
+pub(crate) fn ansi_rgb(color: Color) -> String {
+    match color {
+        Color::Rgb(r, g, b) => format!("{r};{g};{b}"),
+        other => unreachable!("palette colours are RGB, not {other:?}"),
+    }
+}
+
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            Show
+        );
     }
 }
 
 /// Runs the full-screen interactive TUI.
 pub fn run(game: GameState) -> io::Result<()> {
-    let original_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |panic_info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
-        original_hook(panic_info);
-    }));
-
-    enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let _guard = TerminalGuard;
-
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    let mut app = TuiApp::new(game);
-    let res = run_event_loop(&mut terminal, &mut app);
-
-    let _ = terminal.show_cursor();
-    res
+    let (_guard, mut terminal) = enter_tui()?;
+    run_event_loop(&mut terminal, &mut TuiApp::new(game))
 }
 
 fn run_event_loop(

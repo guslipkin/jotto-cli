@@ -139,6 +139,14 @@ impl Lexicon {
             .collect()
     }
 
+    /// Number of secret words up to difficulty tier `max_tier`.
+    pub fn secret_count(&self, max_tier: u8) -> usize {
+        self.secrets
+            .iter()
+            .filter(|&&(_, tier)| tier <= max_tier)
+            .count()
+    }
+
     /// Returns the guessable word at `idx`.
     pub fn word(&self, idx: usize) -> &'static str {
         self.words[idx]
@@ -183,15 +191,15 @@ impl Lexicon {
         dot as f32 / (self.norms[a] * self.norms[b])
     }
 
-    /// Ranks every ranked word by closeness to `secret` (the secret itself is rank 1),
-    /// and gives each guess-only word the rank of the first ranked word it isn't
-    /// closer than, so it shares that rank.
+    /// Ranks every ranked word by closeness to `secret` (the secret itself is rank 1,
+    /// even when it's a guess-only custom word), and gives each guess-only word the
+    /// rank of the first ranked word it isn't closer than, so it shares that rank.
     pub fn rank_against(&self, secret: usize) -> Ranking {
         let sims: Vec<f32> = (0..self.words.len())
             .map(|i| self.similarity(secret, i))
             .collect();
         let mut order: Vec<u32> = (0..self.words.len() as u32)
-            .filter(|&i| self.core[i as usize])
+            .filter(|&i| self.core[i as usize] || i as usize == secret)
             .collect();
         // The secret always comes first, even if rounding gave a near-twin the same score.
         order.sort_by(|&a, &b| {
@@ -206,7 +214,7 @@ impl Lexicon {
             rank[w as usize] = pos as u32 + 1;
         }
         for (i, r) in rank.iter_mut().enumerate() {
-            if !self.core[i] {
+            if !self.core[i] && i != secret {
                 let closer = order.partition_point(|&w| sims[w as usize] > sims[i]);
                 // Never #1: that's the secret's alone.
                 *r = (closer as u32 + 1).max(2);
@@ -251,6 +259,11 @@ impl Ranking {
     /// Rank of word `idx` (1 = the secret).
     pub fn rank_of(&self, idx: usize) -> usize {
         self.rank[idx] as usize
+    }
+
+    /// Number of ranks: the ranked words, plus the secret when it's a guess-only word.
+    pub fn rank_count(&self) -> usize {
+        self.order.len()
     }
 
     /// Ranked word index at `rank` (1-based).

@@ -81,7 +81,7 @@ wordle --plain
 contexto --plain
 ```
 
-Contexto' difficulty (`--difficulty easy|medium|hard`, default medium) sets how abstract the secret word may be; see [Contexto difficulty levels](#contexto-difficulty-levels). `--word <word>` sets its secret for a custom game.
+Contexto's difficulty (`--difficulty easy|medium|hard`, default medium) sets how abstract the secret word may be; see [Contexto difficulty levels](#contexto-difficulty-levels). `--word <word>` sets its secret for a custom game: any word it accepts as a guess, including a plural or other form (`--word mice` makes the secret "mouse").
 
 ### TUI Controls
 
@@ -100,7 +100,7 @@ All bottom bar buttons (**Guess**, **Help**, **New Game**, **Daily**, **Give Up*
 | `Up` / `Down` or Mouse Wheel | Scroll guess history |
 | `Esc`, `Ctrl+C`, or Click **Quit** | Quit |
 
-Contexto' TUI has the same **Guess**, **Help**, **New Game**, **Daily**, **Give Up** and **Quit** controls and a **Difficulty** button (`Ctrl+D` cycles Easy → Medium → Hard), no Scratch pad, and one more: `Tab` or Click **Hint** reveals a closer word. Its **Latest** box shows your most recent guess, and the list shows every guess closest first (hints marked `*`).
+Contexto's TUI has the same **Guess**, **Help**, **New Game**, **Daily**, **Give Up** and **Quit** controls and a **Difficulty** button (`Ctrl+D` cycles Easy → Medium → Hard), no Scratch pad, and one more: `Tab` or Click **Hint** reveals a closer word. Its **Latest** box shows your most recent guess, and the list shows every guess closest first (hints marked `*`).
 
 ### Plain / REPL Commands (`--plain`)
 
@@ -115,11 +115,11 @@ Contexto' TUI has the same **Guess**, **Help**, **New Game**, **Daily**, **Give 
 - `:credits`: Show author and dictionary credits
 - `:quit` or `:exit`: Exit
 
-Contexto' plain mode takes any word as a guess and has `:help`, `:history` (every guess, closest first), `:hint`, `:new [difficulty]`, `:daily`, `:difficulty [level]`, `:giveup`, `:credits` and `:quit`.
+Contexto's plain mode takes any word as a guess, so its commands need their colon (typing `exit` or `help` guesses that word). It has `:help`, `:history` (every guess, closest first), `:hint`, `:new [difficulty]`, `:daily`, `:difficulty [level]`, `:giveup`, `:credits` and `:quit`.
 
 ## Contexto Difficulty Levels
 
-Contexto' levels set how abstract the secret noun may be, since a thing you can point at is far easier to find by meaning than an idea. Each level includes the easier levels' words:
+Contexto's levels set how abstract the secret noun may be, since a thing you can point at is far easier to find by meaning than an idea. Each level includes the easier levels' words:
 - **Easy**: objects, people, animals, food and places ("elephant", "bread", "doctor").
 - **Medium**: adds acts, events, groups and times ("baseball", "ceremony", "parliament"; the default, and always used for daily games).
 - **Hard**: adds ideas, feelings, qualities and states ("credibility", "democracy", "anxiety").
@@ -157,6 +157,6 @@ Ranked words are SCOWL's medium (`50`) list's nouns, verbs, adjectives and adver
 - [Wordle](https://www.nytimes.com/games/wordle) was created by Josh Wardle and is now published by The New York Times; `wordle` is an unofficial version. Play the original at <https://www.nytimes.com/games/wordle>.
 - `contexto` is an unofficial version of [Contexto](https://contexto.me/); play the original at <https://contexto.me/>.
 - Word list from [SCOWL (Spell Checker Oriented Word Lists)](http://wordlist.aspell.net/) by Kevin Atkinson (see [`LICENSE.SCOWL`](LICENSE.SCOWL)).
-- Contexto' word meanings (and, from GloVe 840B's cased vocabulary, which words are names) from [GloVe](https://nlp.stanford.edu/projects/glove/) by Jeffrey Pennington, Richard Socher and Christopher D. Manning, made available under the [Open Data Commons Public Domain Dedication and License](https://opendatacommons.org/licenses/pddl/1-0/).
-- Contexto' difficulty levels from [WordNet 3.0](https://wordnet.princeton.edu/) (Princeton University, "WordNet 3.0", 2006) noun categories; only the derived level, not WordNet itself, is in the binary.
+- Contexto's word meanings (and, from GloVe 840B's cased vocabulary, which words are names) from [GloVe](https://nlp.stanford.edu/projects/glove/) by Jeffrey Pennington, Richard Socher and Christopher D. Manning, made available under the [Open Data Commons Public Domain Dedication and License](https://opendatacommons.org/licenses/pddl/1-0/).
+- Contexto's difficulty levels from [WordNet 3.0](https://wordnet.princeton.edu/) (Princeton University, "WordNet 3.0", 2006) noun categories; only the derived level, not WordNet itself, is in the binary.
 
