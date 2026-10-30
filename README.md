@@ -47,6 +47,19 @@ Contexto asks you to find a secret word by its meaning:
 
 ## Installation
 
+### Quick Install Script
+
+**Linux & macOS:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/guslipkin/jotto-cli/main/install.sh | sh
+```
+*(Installs `jotto`, `wordle`, and `contexto` to `~/.local/bin` by default; pass `-s -- --bin-dir /usr/local/bin` or set `INSTALL_DIR` to customize.)*
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/guslipkin/jotto-cli/main/install.ps1 | iex
+```
+
 ### Pre-built Binaries
 
 Download the latest `jotto`, `wordle` and `contexto` binaries for Linux, macOS, or Windows from the [GitHub Releases](https://github.com/guslipkin/jotto-cli/releases) page.
