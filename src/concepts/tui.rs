@@ -26,6 +26,10 @@ use crate::tui::{
     COLOR_WARNING, MIN_RECOMMENDED_WIDTH,
 };
 
+/// Background of the highlighted row in the guess list. A gray background rather
+/// than reverse video, which would turn the coloured bars black.
+const HIGHLIGHT_BG: Color = Color::DarkGray;
+
 /// Nearest words listed when a game ends.
 const NEAREST_SHOWN: usize = 10;
 /// Longest word the Guess box accepts (the longest guessable word is shorter).
@@ -285,12 +289,26 @@ fn closeness_color(rank: usize) -> Color {
 
 /// A closeness bar `width` cells wide. Without colour, the fill is `#` so it still reads.
 fn bar_spans(rank: usize, width: u16, use_color: bool) -> Vec<Span<'static>> {
+    bar_spans_on(rank, width, use_color, false)
+}
+
+/// A closeness bar for a list row. On the highlighted row, whose background is
+/// [`HIGHLIGHT_BG`], the unfilled part is solid black, so the bar still reads as a
+/// bar against the gray rather than fading into it.
+fn bar_spans_on(rank: usize, width: u16, use_color: bool, highlighted: bool) -> Vec<Span<'static>> {
     let width = width as usize;
     let filled = ((bar_fraction(rank) * width as f64).round() as usize).min(width);
-    let (fill, empty) = if use_color {
-        ("█", "░")
-    } else {
+    let (fill, empty) = if !use_color {
         ("#", ".")
+    } else if highlighted {
+        ("█", "█")
+    } else {
+        ("█", "░")
+    };
+    let empty_color = if use_color && highlighted {
+        Color::Black
+    } else {
+        Color::DarkGray
     };
     vec![
         Span::styled(
@@ -299,7 +317,7 @@ fn bar_spans(rank: usize, width: u16, use_color: bool) -> Vec<Span<'static>> {
         ),
         Span::styled(
             empty.repeat(width - filled),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(empty_color),
         ),
     ]
 }
@@ -596,11 +614,13 @@ fn draw_ui(f: &mut Frame, app: &mut ConceptsApp) {
     let word_w = (list_inner_w / 2).clamp(12, 26);
     let bar_w = list_inner_w.saturating_sub(rank_w + word_w + 2).max(4);
     let latest = app.latest;
+    let selected = app.table_state.selected();
     let rows: Vec<Row> = app
         .game
         .guesses_by_rank()
         .into_iter()
-        .map(|g| {
+        .enumerate()
+        .map(|(i, g)| {
             let mut word_style = Style::default().fg(Color::White);
             if Some(g.number) == latest {
                 word_style = word_style.add_modifier(Modifier::BOLD);
@@ -612,7 +632,12 @@ fn draw_ui(f: &mut Frame, app: &mut ConceptsApp) {
                 Cell::from(format!("#{}", g.rank))
                     .style(Style::default().fg(closeness_color(g.rank))),
                 Cell::from(guess_label(g)).style(word_style),
-                Cell::from(Line::from(bar_spans(g.rank, bar_w, app.use_color))),
+                Cell::from(Line::from(bar_spans_on(
+                    g.rank,
+                    bar_w,
+                    app.use_color,
+                    selected == Some(i),
+                ))),
             ])
         })
         .collect();
@@ -638,7 +663,12 @@ fn draw_ui(f: &mut Frame, app: &mut ConceptsApp) {
             .borders(Borders::ALL)
             .title(" Closest Guesses (* = hint) "),
     )
-    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    .row_highlight_style(if app.use_color {
+        Style::default().bg(HIGHLIGHT_BG)
+    } else {
+        // Without colour a background doesn't show, so fall back to reverse video.
+        Style::default().add_modifier(Modifier::REVERSED)
+    });
     f.render_stateful_widget(table, body[1], &mut app.table_state);
 
     // Clickable footer buttons
@@ -804,6 +834,53 @@ mod tests {
         }
         for text in ["How to Play", "Hard: adds ideas", "WordNet", "to close"] {
             assert!(screen.contains(text), "help is cut off before '{text}'");
+        }
+    }
+
+    #[test]
+    fn highlighted_row_keeps_bar_colours_on_gray() {
+        let mut app = app_with_guesses("dog", &["cat", "violin"]);
+        app.use_color = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| draw_ui(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let row_of = |word: &str| {
+            (0..30u16)
+                .find(|&y| {
+                    (50..100u16)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains(word)
+                })
+                .unwrap()
+        };
+        // The latest guess (VIOLIN) is the highlighted row; CAT isn't.
+        for (y, highlighted) in [(row_of("VIOLIN"), true), (row_of("CAT"), false)] {
+            let bar: Vec<_> = (50..99u16)
+                .map(|x| &buf[(x, y)])
+                .filter(|c| c.symbol() == "█" || c.symbol() == "░")
+                .collect();
+            assert!(!bar.is_empty());
+            let filled = bar
+                .iter()
+                .filter(|c| c.fg != Color::Black && c.symbol() == "█");
+            assert!(filled.count() > 0, "the bar lost its colour");
+            for c in &bar {
+                if highlighted {
+                    assert_eq!(c.bg, HIGHLIGHT_BG);
+                    assert_eq!(c.symbol(), "█");
+                } else {
+                    assert_ne!(c.bg, HIGHLIGHT_BG);
+                }
+            }
+            if highlighted {
+                assert!(
+                    bar.iter().any(|c| c.fg == Color::Black),
+                    "no black unfilled part"
+                );
+            } else {
+                assert!(bar.iter().any(|c| c.symbol() == "░"));
+            }
         }
     }
 
