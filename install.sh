@@ -62,17 +62,60 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+IS_ANDROID=0
+if [ "$(uname -o 2>/dev/null || true)" = "Android" ] \
+    || [ -n "${ANDROID_ROOT:-}" ] \
+    || [ -n "${ANDROID_DATA:-}" ] \
+    || [ -e "/system/bin/linker64" ] \
+    || [ -e "/system/bin/linker" ]; then
+    IS_ANDROID=1
+fi
+
+TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t jotto-install)"
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT INT TERM
+
+check_path_hint() {
+    case ":${PATH}:" in
+        *":${INSTALL_DIR}:"*)
+            ;;
+        *)
+            echo ""
+            echo "Note: $INSTALL_DIR is not currently on your PATH."
+            echo "Add it to your shell profile (e.g. ~/.zshrc or ~/.bashrc):"
+            echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+            ;;
+    esac
+}
+
 install_from_source() {
     if ! command -v cargo >/dev/null 2>&1; then
         echo "Error: 'cargo' is required to build from source. Install Rust from https://rustup.rs/" >&2
         exit 1
     fi
-    echo "Building and installing $BINARIES from source via cargo..."
+    echo "Building and installing $BINARIES from source via cargo into $INSTALL_DIR..."
+    CARGO_ROOT="$TMP_DIR/cargo-root"
     if [ "$VERSION" = "latest" ]; then
-        cargo install --git "https://github.com/$REPO.git" --bins
+        cargo install --git "https://github.com/$REPO.git" --bins --root "$CARGO_ROOT"
     else
-        cargo install --git "https://github.com/$REPO.git" --tag "$VERSION" --bins
+        cargo install --git "https://github.com/$REPO.git" --tag "$VERSION" --bins --root "$CARGO_ROOT"
     fi
+
+    mkdir -p "$INSTALL_DIR"
+    INSTALLED=""
+    for bin in $BINARIES; do
+        if [ -f "$CARGO_ROOT/bin/$bin" ]; then
+            rm -f "$INSTALL_DIR/$bin"
+            cp "$CARGO_ROOT/bin/$bin" "$INSTALL_DIR/$bin"
+            chmod 755 "$INSTALL_DIR/$bin"
+            INSTALLED="$INSTALLED $bin"
+        fi
+    done
+
+    echo "Installed:$INSTALLED -> $INSTALL_DIR"
+    check_path_hint
 }
 
 if [ "$FROM_SOURCE" -eq 1 ]; then
@@ -83,24 +126,23 @@ fi
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
-case "$OS" in
-    Linux)
-        OS_NAME="linux"
-        ;;
-    Darwin)
-        OS_NAME="macos"
-        ;;
-    *)
-        echo "Unsupported OS '$OS' for pre-built Unix archives." >&2
-        if command -v cargo >/dev/null 2>&1; then
-            echo "Falling back to building from source with cargo..."
-            install_from_source
-            exit 0
-        fi
-        echo "Please install on Windows using install.ps1 or build from source with 'cargo install --git https://github.com/$REPO.git --bins'." >&2
-        exit 1
-        ;;
-esac
+if [ "$IS_ANDROID" -eq 1 ]; then
+    OS_NAME="android"
+else
+    case "$OS" in
+        Linux)
+            OS_NAME="linux"
+            ;;
+        Darwin)
+            OS_NAME="macos"
+            ;;
+        *)
+            echo "Error: unsupported OS '$OS' for pre-built Unix archives." >&2
+            echo "Please install on Windows using install.ps1 or pass --from-source to build with cargo." >&2
+            exit 1
+            ;;
+    esac
+fi
 
 case "$ARCH" in
     x86_64|amd64)
@@ -110,13 +152,8 @@ case "$ARCH" in
         ARCH_NAME="aarch64"
         ;;
     *)
-        echo "Unsupported architecture '$ARCH' for pre-built archives." >&2
-        if command -v cargo >/dev/null 2>&1; then
-            echo "Falling back to building from source with cargo..."
-            install_from_source
-            exit 0
-        fi
-        echo "Please build from source with 'cargo install --git https://github.com/$REPO.git --bins'." >&2
+        echo "Error: unsupported architecture '$ARCH' for pre-built archives." >&2
+        echo "Pass --from-source to build and install with cargo." >&2
         exit 1
         ;;
 esac
@@ -146,20 +183,10 @@ download() {
     fi
 }
 
-TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t jotto-install)"
-cleanup() {
-    rm -rf "$TMP_DIR"
-}
-trap cleanup EXIT INT TERM
-
 echo "Downloading $ARCHIVE_FILE ($VERSION) for $ASSET_NAME..."
 if ! download "$ARCHIVE_URL" "$TMP_DIR/$ARCHIVE_FILE"; then
-    echo "Error: failed to download $ARCHIVE_URL" >&2
-    if command -v cargo >/dev/null 2>&1; then
-        echo "Falling back to building from source with cargo..."
-        cargo install --git "https://github.com/$REPO.git" --bins
-        exit 0
-    fi
+    echo "Error: failed to download pre-built archive $ARCHIVE_URL" >&2
+    echo "Make sure a GitHub release containing $ARCHIVE_FILE has been published, or pass --from-source." >&2
     exit 1
 fi
 
@@ -192,6 +219,7 @@ mkdir -p "$INSTALL_DIR"
 INSTALLED=""
 for bin in $BINARIES; do
     if [ -f "$STAGING_DIR/$bin" ]; then
+        rm -f "$INSTALL_DIR/$bin"
         cp "$STAGING_DIR/$bin" "$INSTALL_DIR/$bin"
         chmod 755 "$INSTALL_DIR/$bin"
         INSTALLED="$INSTALLED $bin"
@@ -204,14 +232,4 @@ if [ -z "$INSTALLED" ]; then
 fi
 
 echo "Installed:$INSTALLED -> $INSTALL_DIR"
-
-case ":${PATH}:" in
-    *":${INSTALL_DIR}:"*)
-        ;;
-    *)
-        echo ""
-        echo "Note: $INSTALL_DIR is not currently on your PATH."
-        echo "Add it to your shell profile (e.g. ~/.zshrc or ~/.bashrc):"
-        echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
-        ;;
-esac
+check_path_hint

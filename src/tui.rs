@@ -512,6 +512,7 @@ fn copy_to_clipboard(text: &str) -> bool {
         &[("clip", &[])]
     } else {
         &[
+            ("termux-clipboard-set", &[]),
             ("wl-copy", &[]),
             ("xclip", &["-selection", "clipboard"]),
             ("xsel", &["--clipboard", "--input"]),
