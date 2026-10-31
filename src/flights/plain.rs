@@ -211,9 +211,9 @@ fn print_settings(game: &FlightsGame) {
         code(&c.end),
         unused(c.fixed_route)
     );
-    match (c.problem(), c.puzzle_count()) {
-        (Some(why), _) => println!("Can't play these settings: {why}."),
-        (None, n) => println!("Puzzles with these settings: {}", grouped(n)),
+    match c.check() {
+        Err(why) => println!("Can't play these settings: {why}."),
+        Ok(n) => println!("Puzzles with these settings: {}", grouped(n)),
     }
     println!();
 }

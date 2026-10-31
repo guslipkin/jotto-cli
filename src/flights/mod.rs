@@ -61,7 +61,8 @@ pub fn run_cli() {
     ) {
         Ok(started) => started,
         Err(err) => {
-            eprintln!("Error initializing game with custom route: {err}");
+            // Either --route, or custom settings (from the save) that fit no puzzle.
+            eprintln!("Error starting a game: {err}");
             process::exit(1);
         }
     };

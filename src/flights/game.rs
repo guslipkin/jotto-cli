@@ -206,19 +206,9 @@ impl Rules {
     }
 
     /// Number of puzzles these rules can deal: from the data file's counts, or for
-    /// a custom start or end, by searching from it.
+    /// a custom start or end, by searching from it (0 when none fit).
     pub fn puzzle_count(&self) -> usize {
-        self.puzzle_count_in(self.network())
-    }
-
-    /// [`Rules::puzzle_count`] on `net`.
-    pub fn puzzle_count_in(&self, net: &Network) -> usize {
-        match self.fixed(net) {
-            Err(_) => 0,
-            Ok((None, None)) => net.puzzle_count(self.hop_limit()),
-            Ok((Some(a), None) | (None, Some(a))) => net.puzzle_ends(a, self.hop_limit()).len(),
-            Ok((Some(_), Some(_))) => 1,
-        }
+        self.check().unwrap_or(0)
     }
 
     /// The custom start and end as airports in `net`, or why they can't be played:
@@ -251,15 +241,10 @@ impl Rules {
             if letters_apart(ca, cb) != 3 {
                 return Err(format!("{ca} and {cb} must differ in every letter"));
             }
-            if !net.puzzle_ends(a, self.hop_limit()).contains(&b) {
+            // A fixed route has no hop limit, so only these two can rule it out.
+            if !net.puzzle_ends(a, None).contains(&b) {
                 return Err(match net.shortest(a, b) {
                     None => format!("there's no way from {ca} to {cb}"),
-                    Some((_, path)) if self.hop_limit().is_some_and(|max| path.len() - 1 > max) => {
-                        format!(
-                            "{ca} to {cb} takes {} hops, more than the max",
-                            path.len() - 1
-                        )
-                    }
                     Some(_) => format!("only one route joins {ca} and {cb}"),
                 });
             }
@@ -269,11 +254,22 @@ impl Rules {
 
     /// Why these rules can deal no puzzle, if they can't.
     pub fn problem(&self) -> Option<String> {
-        match self.fixed(self.network()) {
-            Err(why) => Some(why),
-            Ok(_) if self.puzzle_count() == 0 => Some("no puzzles fit these settings".to_string()),
-            Ok(_) => None,
+        self.check().err()
+    }
+
+    /// How many puzzles these rules can deal, or why they can deal none, from
+    /// one look at them (each look can mean several shortest-route searches).
+    pub fn check(&self) -> Result<usize, String> {
+        let net = self.network();
+        let count = match self.fixed(net)? {
+            (None, None) => net.puzzle_count(self.hop_limit()),
+            (Some(a), None) | (None, Some(a)) => net.puzzle_ends(a, self.hop_limit()).len(),
+            (Some(_), Some(_)) => 1,
+        };
+        if count == 0 {
+            return Err("no puzzles fit these settings".to_string());
         }
+        Ok(count)
     }
 
     /// A random puzzle from `net` by these rules, keeping a custom start or end.

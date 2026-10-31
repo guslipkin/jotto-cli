@@ -206,6 +206,10 @@ struct SettingsPage {
     end_text: String,
     /// Why the last attempt to play couldn't start.
     problem: Option<String>,
+    /// The custom settings' puzzle count, or why they have none, worked out
+    /// when they change rather than on every redraw, since each look can mean
+    /// several searches of the whole network.
+    status: Result<usize, String>,
 }
 
 impl SettingsPage {
@@ -219,6 +223,7 @@ impl SettingsPage {
             units,
             start_text: text(&custom.start),
             end_text: text(&custom.end),
+            status: custom.check(),
             custom,
             problem: None,
         }
@@ -268,6 +273,7 @@ impl SettingsPage {
         self.custom.start = parse_code(&self.start_text);
         self.custom.end = parse_code(&self.end_text);
         self.problem = None;
+        self.status = self.custom.check();
     }
 
     /// Types a letter into the start or end code (a fourth starts it over).
@@ -325,6 +331,7 @@ impl SettingsPage {
             }
         }
         self.problem = None;
+        self.status = self.custom.check();
     }
 }
 
@@ -497,7 +504,7 @@ impl FlightsApp {
             self.message = ("Settings saved.".to_string(), COLOR_ACCENT);
             return;
         }
-        if let Some(why) = page.custom.problem() {
+        if let Err(why) = &page.status {
             self.settings = Some(SettingsPage {
                 problem: Some(format!("Can't play: {why}.")),
                 ..page
@@ -507,9 +514,16 @@ impl FlightsApp {
         self.start_new_game(Some(Difficulty::Custom));
     }
 
+    /// Moves to the next difficulty, past Custom when its settings can't be
+    /// played (so the cycle never sticks there, and says why it skipped it).
     fn cycle_difficulty(&mut self) {
         let next = self.game.difficulty().next();
         self.start_new_game(Some(next));
+        if self.game.difficulty() != next {
+            let skipped = self.message.0.clone();
+            self.start_new_game(Some(next.next()));
+            self.message.0 = format!("{}\n(Skipped Custom: {skipped})", self.message.0);
+        }
     }
 
     fn start_daily_game(&mut self) {
@@ -1832,7 +1846,6 @@ fn draw_settings(f: &mut Frame, page: &SettingsPage) {
             Span::styled(format!("  {note}"), Style::default().fg(Color::DarkGray)),
         ])
     };
-    let count = c.puzzle_count();
     let mut lines = vec![
         Line::from(Span::styled("Settings", heading)),
         row_line(0, SETTINGS[0]),
@@ -1847,15 +1860,15 @@ fn draw_settings(f: &mut Frame, page: &SettingsPage) {
             .map(|(i, &s)| row_line(i, s)),
     );
     lines.push(Line::from(""));
-    lines.push(match (&page.problem, c.problem()) {
+    lines.push(match (&page.problem, &page.status) {
         (Some(problem), _) => Line::from(Span::styled(problem.clone(), bold(COLOR_WARNING))),
-        (None, Some(why)) => Line::from(Span::styled(
+        (None, Err(why)) => Line::from(Span::styled(
             format!("Can't play these settings: {why}."),
             bold(COLOR_WARNING),
         )),
-        (None, None) => Line::from(vec![
+        (None, Ok(count)) => Line::from(vec![
             Span::raw("Puzzles with these settings: "),
-            Span::styled(grouped(count), bold(COLOR_POSITIVE)),
+            Span::styled(grouped(*count), bold(COLOR_POSITIVE)),
         ]),
     });
     // Each level's own limit, for reference when choosing custom's.
@@ -2309,6 +2322,27 @@ mod tests {
         let selected = app.options_state.selected().unwrap();
         assert_eq!(options[selected].airport, chosen, "the choice was lost");
         assert_eq!(selected, 2);
+    }
+
+    #[test]
+    fn difficulty_cycle_skips_custom_settings_that_cant_play() {
+        let mut app = app(Difficulty::Pilot);
+        app.game.set_custom(Rules {
+            fixed_route: true,
+            start: Some(*b"QQQ"),
+            ..Rules::default()
+        });
+        app.cycle_difficulty();
+        assert_eq!(
+            app.game.difficulty(),
+            Difficulty::Easy,
+            "stuck before Custom"
+        );
+        assert!(
+            app.message.0.contains("Skipped Custom"),
+            "{}",
+            app.message.0
+        );
     }
 
     #[test]

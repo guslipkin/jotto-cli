@@ -317,10 +317,15 @@ impl Network {
     /// second way through, while a route made only of bridges is the only one.
     /// Every route between two airports crosses the same bridges, so any one will do.
     pub fn has_two_routes(&self, start: usize, end: usize) -> bool {
-        self.shortest(start, end).is_some_and(|(_, path)| {
-            path.windows(2)
-                .any(|w| !self.bridges.contains(&(w[0].min(w[1]), w[0].max(w[1]))))
-        })
+        self.shortest(start, end)
+            .is_some_and(|(_, path)| self.crosses_a_loop(&path))
+    }
+
+    /// Whether a route (as its airports) uses a hop that isn't a bridge, which
+    /// is what [`Network::has_two_routes`] checks.
+    fn crosses_a_loop(&self, path: &[usize]) -> bool {
+        path.windows(2)
+            .any(|w| !self.bridges.contains(&(w[0].min(w[1]), w[0].max(w[1]))))
     }
 
     /// Every airport that makes a puzzle with `start` within `max_hops` (any
@@ -437,8 +442,9 @@ impl Network {
             .collect();
         rng.shuffle(&mut ends);
         ends.into_iter().take(attempts).find(|&end| {
+            // One search gives both the route's length and whether it has a loop.
             self.shortest(start, end).is_some_and(|(_, path)| {
-                max_hops.is_none_or(|max| path.len() - 1 <= max) && self.has_two_routes(start, end)
+                max_hops.is_none_or(|max| path.len() - 1 <= max) && self.crosses_a_loop(&path)
             })
         })
     }

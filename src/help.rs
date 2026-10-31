@@ -57,6 +57,29 @@ fn key_chip(key: &str) -> Span<'static> {
     )
 }
 
+/// Indent of a row's name and of a credit, and of a bullet's text.
+const ROW_INDENT: usize = 3;
+/// Gap between a row's name column and its description, or a credit's two parts.
+const COLUMN_GAP: usize = 2;
+
+/// Widths of a section's shared columns: its rows' names and its credits' first
+/// parts, so each lines up down the section. Used both to lay a section out and
+/// to measure it, so the two always agree.
+fn column_widths(section: &HelpSection) -> (usize, usize) {
+    let widest =
+        |f: fn(&HelpLine) -> Option<usize>| section.lines.iter().filter_map(f).max().unwrap_or(0);
+    (
+        widest(|l| match l {
+            HelpLine::Row { name, .. } => Some(name.chars().count()),
+            _ => None,
+        }),
+        widest(|l| match l {
+            HelpLine::Credit(what, _) => Some(what.chars().count()),
+            _ => None,
+        }),
+    )
+}
+
 /// Lays out one section for a column `width` cells wide.
 fn section_lines(section: &HelpSection, width: u16) -> Vec<Line<'static>> {
     let width = usize::from(width);
@@ -69,25 +92,7 @@ fn section_lines(section: &HelpSection, width: u16) -> Vec<Line<'static>> {
         Span::raw(" "),
         Span::styled("─".repeat(rule), Style::default().fg(Color::DarkGray)),
     ])];
-    // Rows share their name column within a section.
-    let name_width = section
-        .lines
-        .iter()
-        .filter_map(|l| match l {
-            HelpLine::Row { name, .. } => Some(name.chars().count()),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
-    let credit_width = section
-        .lines
-        .iter()
-        .filter_map(|l| match l {
-            HelpLine::Credit(what, _) => Some(what.chars().count()),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
+    let (name_width, credit_width) = column_widths(section);
     for line in &section.lines {
         lines.push(match line {
             HelpLine::Bullet(text) => {
@@ -108,7 +113,7 @@ fn section_lines(section: &HelpSection, width: u16) -> Vec<Line<'static>> {
             }
             HelpLine::Row { name, desc, note } => {
                 // The note sits at the right edge; the description takes what's left.
-                let used = 3 + name_width + 2 + note.chars().count() + 1;
+                let used = ROW_INDENT + name_width + COLUMN_GAP + note.chars().count() + 1;
                 let room = width.saturating_sub(used);
                 let desc: String = if desc.chars().count() > room {
                     let cut: String = desc.chars().take(room.saturating_sub(1)).collect();
@@ -117,14 +122,14 @@ fn section_lines(section: &HelpSection, width: u16) -> Vec<Line<'static>> {
                     format!("{desc:<room$}")
                 };
                 Line::from(vec![
-                    Span::raw("   "),
+                    Span::raw(" ".repeat(ROW_INDENT)),
                     Span::styled(
                         format!("{name:<name_width$}"),
                         Style::default()
                             .fg(Color::White)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw("  "),
+                    Span::raw(" ".repeat(COLUMN_GAP)),
                     Span::raw(desc),
                     Span::raw(" "),
                     Span::styled(note.clone(), Style::default().fg(Color::Gray)),
@@ -132,7 +137,11 @@ fn section_lines(section: &HelpSection, width: u16) -> Vec<Line<'static>> {
             }
             HelpLine::Credit(what, who) => Line::from(vec![
                 Span::styled(
-                    format!("   {what:<credit_width$}  "),
+                    format!(
+                        "{}{what:<credit_width$}{}",
+                        " ".repeat(ROW_INDENT),
+                        " ".repeat(COLUMN_GAP)
+                    ),
                     Style::default().fg(Color::Gray),
                 ),
                 Span::raw(who.clone()),
@@ -144,24 +153,7 @@ fn section_lines(section: &HelpSection, width: u16) -> Vec<Line<'static>> {
 
 /// The width a section needs to show every line whole.
 fn natural_width(section: &HelpSection) -> usize {
-    let name_width = section
-        .lines
-        .iter()
-        .filter_map(|l| match l {
-            HelpLine::Row { name, .. } => Some(name.chars().count()),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
-    let credit_width = section
-        .lines
-        .iter()
-        .filter_map(|l| match l {
-            HelpLine::Credit(what, _) => Some(what.chars().count()),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
+    let (name_width, credit_width) = column_widths(section);
     section
         .lines
         .iter()
@@ -175,9 +167,16 @@ fn natural_width(section: &HelpSection) -> usize {
                     + 2 * keys.len().saturating_sub(1)
             }
             HelpLine::Row { desc, note, .. } => {
-                3 + name_width + 2 + desc.chars().count() + 1 + note.chars().count()
+                ROW_INDENT
+                    + name_width
+                    + COLUMN_GAP
+                    + desc.chars().count()
+                    + 1
+                    + note.chars().count()
             }
-            HelpLine::Credit(_, who) => 3 + credit_width + 2 + who.chars().count(),
+            HelpLine::Credit(_, who) => {
+                ROW_INDENT + credit_width + COLUMN_GAP + who.chars().count()
+            }
         })
         .chain([section.title.chars().count() + 4])
         .max()
@@ -206,7 +205,8 @@ pub(crate) fn draw_help_page(f: &mut Frame, page: &HelpPage) {
         .sections
         .iter()
         .map(natural_width)
-        .chain([page.game.chars().count() + 13 + page.tagline.chars().count()])
+        // "How to Play {game}" and "  {tagline}".
+        .chain([12 + page.game.chars().count() + 2 + page.tagline.chars().count()])
         .max()
         .unwrap_or(0) as u16;
     let lines: u16 = page.sections.iter().map(|s| s.lines.len() as u16 + 1).sum();
@@ -304,6 +304,31 @@ pub(crate) fn draw_help_page(f: &mut Frame, page: &HelpPage) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_tagline_fits_its_box() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let tagline = "a tagline longer than any line in the sections below it";
+        let page = HelpPage {
+            game: "Test",
+            tagline: tagline.to_string(),
+            sections: vec![HelpSection {
+                title: "Rules",
+                lines: vec![HelpLine::Bullet(Line::from("short"))],
+            }],
+        };
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| draw_help_page(f, &page)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains(tagline), "the tagline was cut");
+    }
 
     #[test]
     fn columns_split_near_the_middle() {

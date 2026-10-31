@@ -3,7 +3,7 @@
 
 Run by hand when the routes should be refreshed, not from build.rs: it reads
 thousands of Wikipedia articles, far too slow (and too unkind to Wikipedia) for
-every build, while the result is about 400 KB and is committed.
+every build, while the result is about 550 KB and is committed.
 
     python3 scripts/build-flights-data.py --cache-dir ~/.cache/flights-wiki
 

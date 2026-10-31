@@ -107,17 +107,57 @@ fn remember(history: &mut Vec<String>, line: &str) {
 
 /// Rewrites the line in place, leaving the cursor where the editor's is.
 fn redraw(out: &mut impl Write, prompt: &str, editor: &Editor) -> io::Result<()> {
-    let text: String = editor.buf.iter().collect();
-    let column = prompt.chars().count() + editor.cursor;
+    let columns = terminal::size().map_or(80, |(w, _)| usize::from(w));
+    let (text, cursor) = visible(prompt, editor, columns);
     queue!(
         out,
         MoveToColumn(0),
         crossterm::style::Print(prompt),
         crossterm::style::Print(text),
         Clear(ClearType::UntilNewLine),
-        MoveToColumn(u16::try_from(column).unwrap_or(u16::MAX)),
+        MoveToColumn(u16::try_from(cursor).unwrap_or(u16::MAX)),
     )?;
     out.flush()
+}
+
+/// Width of `text` in terminal cells (a CJK character or emoji takes two).
+fn cells(text: &str) -> usize {
+    ratatui::text::Span::raw(text).width()
+}
+
+/// The part of the line to show after `prompt` in a terminal `columns` wide,
+/// and the cursor's column. A line too long for one row scrolls sideways to keep
+/// the cursor in view, since a line that wrapped onto a second row would be
+/// redrawn on the wrong one. Widths are counted in cells, not characters.
+fn visible(prompt: &str, editor: &Editor, columns: usize) -> (String, usize) {
+    let prompt_cells = cells(prompt);
+    // A cell is kept free at the end, so the cursor never sits past the edge.
+    let room = columns.saturating_sub(prompt_cells + 1).max(1);
+    let width = |c: &char| cells(&c.to_string());
+    // Start as late as needed for the text up to the cursor to fit.
+    let mut start = 0;
+    while editor.buf[start..editor.cursor]
+        .iter()
+        .map(width)
+        .sum::<usize>()
+        > room
+    {
+        start += 1;
+    }
+    let mut used = 0;
+    let shown: String = editor.buf[start..]
+        .iter()
+        .take_while(|c| {
+            used += width(c);
+            used <= room
+        })
+        .collect();
+    let cursor = prompt_cells
+        + editor.buf[start..editor.cursor]
+            .iter()
+            .map(width)
+            .sum::<usize>();
+    (shown, cursor)
 }
 
 /// What a key did to the line being edited.
@@ -291,6 +331,34 @@ mod tests {
         assert_eq!(e.handle(ctrl('d'), &[]), Outcome::Editing);
         assert_eq!(text(&e), "b");
         assert_eq!(e.handle(ctrl('c'), &[]), Outcome::End);
+    }
+
+    #[test]
+    fn long_lines_scroll_to_keep_the_cursor_in_view() {
+        let mut e = Editor::default();
+        type_text(&mut e, "abcdefghijklmnopqrstuvwxyz", &[]);
+        // "> " and a 12-column terminal leave 9 cells for text.
+        let (shown, cursor) = visible("> ", &e, 12);
+        assert_eq!(shown, "rstuvwxyz");
+        assert_eq!(cursor, 11);
+        // Back at the start, the start shows.
+        e.handle(key(KeyCode::Home), &[]);
+        let (shown, cursor) = visible("> ", &e, 12);
+        assert_eq!(shown, "abcdefghi");
+        assert_eq!(cursor, 2);
+        // A short line is shown whole.
+        let mut short = Editor::default();
+        type_text(&mut short, "crane", &[]);
+        assert_eq!(visible("> ", &short, 80), ("crane".to_string(), 7));
+    }
+
+    #[test]
+    fn wide_characters_take_two_cells() {
+        let mut e = Editor::default();
+        type_text(&mut e, "日本", &[]);
+        let (shown, cursor) = visible("> ", &e, 80);
+        assert_eq!(shown, "日本");
+        assert_eq!(cursor, 2 + 4);
     }
 
     #[test]
