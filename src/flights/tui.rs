@@ -451,7 +451,12 @@ impl FlightsApp {
                     ),
                     Color::Gray,
                 );
-                self.reset_selection();
+                // The airport just left is the one that was chosen from here, so
+                // it's chosen again rather than the list starting over at the top.
+                let options = self.game.options();
+                let i = options.iter().position(|o| o.airport == left);
+                self.options_state =
+                    TableState::default().with_selected(i.or((!options.is_empty()).then_some(0)));
             }
             None => {
                 self.message = (
@@ -2285,6 +2290,25 @@ mod tests {
         let (_, (_, _, y0, y1)) = app.current_view().unwrap();
         let (_, fitted) = app.map_frame.get().unwrap();
         assert!(y1 - y0 <= MAX_VIEW_LAT.max(fitted.3 - fitted.2) + 1e-9);
+    }
+
+    #[test]
+    fn going_back_keeps_the_choice() {
+        // Find a start with a few options, choose one further down, fly, come back.
+        let mut app = (0..50)
+            .map(|_| app(Difficulty::Medium))
+            .find(|a| a.game.options().len() >= 3)
+            .expect("a start with three options");
+        app.move_selection(true);
+        app.move_selection(true);
+        let chosen = app.game.options()[2].airport;
+        app.submit();
+        assert_eq!(app.game.current(), chosen);
+        app.go_back();
+        let options = app.game.options();
+        let selected = app.options_state.selected().unwrap();
+        assert_eq!(options[selected].airport, chosen, "the choice was lost");
+        assert_eq!(selected, 2);
     }
 
     #[test]
