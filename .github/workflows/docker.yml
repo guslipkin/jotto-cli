@@ -1,11 +1,16 @@
 name: Docker
 
-# The browser arcade image (see Dockerfile), on the same rules as the binaries'
-# release workflow: a published GitHub Release builds and pushes it to GHCR,
-# tagged with the release's version; running the workflow by hand only builds
-# it, as a check.
+# The browser arcade image (see Dockerfile), built and pushed to GHCR:
+#   - every commit to main: tagged `latest` and `sha-<commit>`;
+#   - a published GitHub Release: tagged with its version (1.2.3 and 1.2), on the
+#     same rules as the binaries' release workflow.
+# Running the workflow by hand only builds it, as a check.
+# `latest` follows main rather than releases, so a release of an older commit
+# never moves it backwards.
 
 on:
+  push:
+    branches: [main]
   release:
     types: [published]
   workflow_dispatch:
@@ -14,12 +19,15 @@ permissions:
   contents: read
   packages: write
 
+# A newer commit to main supersedes one still building; releases always finish.
 concurrency:
-  group: docker-${{ github.ref_name }}
-  cancel-in-progress: false
+  group: docker-${{ github.event_name }}-${{ github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
   IMAGE_NAME: jotto-arcade
+  # Main and releases are pushed; a run by hand only builds.
+  PUBLISH: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   build:
@@ -39,7 +47,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set Cargo package version from release tag
+      - name: Set Cargo package version from release tag (and in Cargo.lock)
         shell: python
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
@@ -59,7 +67,19 @@ jobs:
                   count=1,
               )
               p.write_text(text, encoding="utf-8")
-              print(f"Updated Cargo.toml version to {tag}")
+              # The image builds with --locked, which won't let Cargo.lock's own
+              # entry for this crate fall out of step, so it's stamped too.
+              lock = pathlib.Path("Cargo.lock")
+              text, n = re.subn(
+                  r'(\[\[package\]\]\nname = "jotto"\nversion = )"[^"]+"',
+                  rf'\1"{tag}"',
+                  lock.read_text(encoding="utf-8"),
+                  count=1,
+              )
+              if n != 1:
+                  raise SystemExit("Couldn't find jotto's entry in Cargo.lock")
+              lock.write_text(text, encoding="utf-8")
+              print(f"Updated Cargo.toml and Cargo.lock version to {tag}")
           else:
               print(f"Keeping existing Cargo.toml version (ref: {tag})")
 
@@ -75,7 +95,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        if: github.event_name == 'release'
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -91,10 +111,10 @@ jobs:
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=${{ env.PLATFORM_SLUG }}
           cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_SLUG }}
-          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ github.event_name == 'release' }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ env.PUBLISH }}
 
       - name: Export digest
-        if: github.event_name == 'release'
+        if: env.PUBLISH == 'true'
         shell: bash
         run: |
           mkdir -p "${{ runner.temp }}/digests"
@@ -102,7 +122,7 @@ jobs:
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
       - name: Upload digest
-        if: github.event_name == 'release'
+        if: env.PUBLISH == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: digest-${{ env.PLATFORM_SLUG }}
@@ -114,7 +134,7 @@ jobs:
     name: Publish to GHCR
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
+    if: github.event_name != 'workflow_dispatch'
     steps:
       - name: Download digests
         uses: actions/download-artifact@v8
@@ -137,17 +157,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # The release's version (1.2.3 and 1.2) and latest, as the binaries'
-      # release names its version; a pre-release doesn't move latest.
+      # A commit to main: latest, and its short sha so any build can be pinned.
+      # A release: its version (1.2.3 and 1.2), as the binaries' release names it.
       - name: Image tags
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=semver,pattern={{version}},value=${{ github.event.release.tag_name }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }}
-            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+            type=sha,format=short,enable=${{ github.event_name == 'push' }}
+            type=semver,pattern={{version}},value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
 
       - name: Tag and push the multi-platform image
         working-directory: ${{ runner.temp }}/digests
@@ -161,4 +182,6 @@ jobs:
           docker buildx imagetools create "${args[@]}"
 
       - name: Inspect image
-        run: docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}"
+        env:
+          FIRST_TAG: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+        run: docker buildx imagetools inspect "$FIRST_TAG"

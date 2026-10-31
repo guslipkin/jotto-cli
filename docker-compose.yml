@@ -1,7 +1,8 @@
 # The four games in a web browser: `docker compose up`, then open
 # http://localhost:7681. Every browser tab is its own session. See Dockerfile.
-# Without --build it uses the released image from GHCR (built from each GitHub
-# Release by .github/workflows/docker.yml); with --build, this checkout.
+# Without --build it uses the published image from GHCR (`latest` is built from
+# every commit to main by .github/workflows/docker.yml); with --build, this
+# checkout.
 services:
   arcade:
     build: .
