@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, Write};
+use std::io;
 use std::str::FromStr;
 
 use crate::dict;
@@ -6,13 +6,12 @@ use crate::game::{
     supports_color, Difficulty, GameMode, GameState, GameStatus, LetterState, ScratchState,
     MAX_WORDLE_GUESSES,
 };
+use crate::line_input::LineReader;
 use crate::save::Autosave;
 use crate::tui::{ansi_rgb, COLOR_NEGATIVE, COLOR_POSITIVE, COLOR_WARNING};
 
 /// Runs the line-by-line REPL / Plain CLI mode for either Jotto or Wordle.
 pub fn run(mut game: GameState, autosave: &mut Autosave) -> io::Result<()> {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
     let mode = game.mode();
     let use_color = supports_color();
 
@@ -39,18 +38,14 @@ pub fn run(mut game: GameState, autosave: &mut Autosave) -> io::Result<()> {
         }
     }
 
-    let mut lines = stdin.lock().lines();
+    let mut reader = LineReader::new();
     loop {
         // Every command and guess comes back here, so this saves each change.
         autosave.sync(&game.to_saved());
-        print!("{}> ", mode.command_name());
-        stdout.flush()?;
-
-        let Some(line_res) = lines.next() else {
+        let Some(raw_line) = reader.read_line(&format!("{}> ", mode.command_name()))? else {
             println!();
             break;
         };
-        let raw_line = line_res?;
         let trimmed = raw_line.trim();
         if trimmed.is_empty() {
             continue;

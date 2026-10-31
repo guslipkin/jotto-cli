@@ -14,13 +14,14 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::dict;
 use crate::game::{
     supports_color, GameMode, GameState, GameStatus, LetterState, ScratchState, MAX_WORDLE_GUESSES,
 };
+use crate::help::{draw_help_page, HelpLine, HelpPage, HelpSection};
 use crate::save::{Autosave, Notice};
 
 /// Okabe-Ito colorblind-safe palette
@@ -1502,139 +1503,138 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
 
     // Help & Credits Modal
     if app.show_help {
-        let area = centered_rect(74, 80, f.area());
-        f.render_widget(Clear, area);
-        let easy_n = dict::word_count(mode, crate::game::Difficulty::Easy.scowl_size());
-        let med_n = dict::word_count(mode, crate::game::Difficulty::Medium.scowl_size());
-        let hard_n = dict::word_count(mode, crate::game::Difficulty::Hard.scowl_size());
-        let scrab_n = dict::word_count(mode, crate::game::Difficulty::Scrabble.scowl_size());
-        let insane_n = dict::word_count(mode, crate::game::Difficulty::Insane.scowl_size());
-
-        let mut help_text = match mode {
-            GameMode::Jotto => vec![
-                Line::from(Span::styled(
-                    "How to Play Jotto",
-                    Style::default()
-                        .fg(COLOR_ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from("Jotto is a game where you try to guess the five-letter secret word:"),
-                Line::from("  • The secret word has 5 unique letters (no repeating letters)."),
-                Line::from("  • The word is not a proper noun."),
-                Line::from("  • After each guess, you are told how many letters your guess shares"),
-                Line::from("    in common with the secret word (regardless of position)."),
-                Line::from(
-                    "  • Scratch: Click letters, or [Tab] then type/Space to toggle states.",
-                ),
-                Line::from(
-                    "  • Daily Mode ([^T] or --daily): Deterministic UTC daily word challenge.",
-                ),
-            ],
-            GameMode::Wordle => vec![
-                Line::from(Span::styled(
-                    "How to Play Wordle",
-                    Style::default()
-                        .fg(COLOR_ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from("Wordle is a game where you have 6 guesses to find the 5-letter word:"),
-                Line::from(
-                    "  • Repeating letters are allowed; the word is not a proper noun or plural.",
-                ),
-                Line::from(vec![
-                    Span::raw("  • "),
-                    Span::styled(
-                        if app.use_color { " X " } else { "+X+" },
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(COLOR_POSITIVE)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(" (Green): Letter is in the word and in the exact spot."),
-                ]),
-                Line::from(vec![
-                    Span::raw("  • "),
-                    Span::styled(
-                        if app.use_color { " X " } else { "?X?" },
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(COLOR_WARNING)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(" (Orange): Letter is in the word, but in a different spot."),
-                ]),
-                Line::from(vec![
-                    Span::raw("  • "),
-                    Span::styled(
-                        if app.use_color { " X " } else { "~X~" },
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::CROSSED_OUT),
-                    ),
-                    Span::raw(" (Gray/Crossed): Letter is not in the word in any spot."),
-                ]),
-                Line::from(
-                    "  • Daily Mode ([^T] or --daily): Deterministic UTC daily word challenge.",
-                ),
-            ],
-        };
-
-        help_text.extend([
-            Line::from(""),
-            Line::from(Span::styled(
-                "Difficulty Levels (SCOWL)",
-                Style::default()
-                    .fg(COLOR_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(format!(
-                "  • Easy (35): Recommended small dictionary ({easy_n} words)."
-            )),
-            Line::from(format!(
-                "  • Medium (50): Recommended medium dictionary ({med_n} words)."
-            )),
-            Line::from(format!(
-                "  • Hard (70): Recommended large dictionary ({hard_n} words)."
-            )),
-            Line::from(format!(
-                "  • Scrabble (80): Strange & unusual word-game words ({scrab_n} words)."
-            )),
-            Line::from(format!(
-                "  • 🤷 Insane (95): Every valid 5-letter English word ({insane_n} words)."
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Credits",
-                Style::default()
-                    .fg(COLOR_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from("  • Created by Gus Lipkin (https://guslipkin.me)"),
-            Line::from("  • Word list powered by SCOWL (http://wordlist.aspell.net/)"),
-        ]);
-        if mode == GameMode::Wordle {
-            help_text.push(Line::from(
-                "  • Wordle was created by Josh Wardle: https://www.nytimes.com/games/wordle",
-            ));
-        }
-        help_text.extend([
-            Line::from(""),
-            Line::from(Span::styled(
-                "Click anywhere or press [Esc] / [Enter] to close",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ]);
-
-        let modal = Paragraph::new(help_text).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Help & Credits ")
-                .border_style(Style::default().fg(COLOR_ACCENT)),
-        );
-        f.render_widget(modal, area);
+        draw_help(f, mode, app.use_color);
     }
+}
+
+/// The help page: rules (and Wordle's colours), controls, levels with their word
+/// counts, and credits.
+fn draw_help(f: &mut Frame, mode: GameMode, use_color: bool) {
+    use crate::game::Difficulty as D;
+    let bullet = |text: &'static str| HelpLine::Bullet(Line::from(text));
+    let tile = |plain: &'static str, style: Style, what: &'static str| {
+        HelpLine::Bullet(Line::from(vec![
+            Span::styled(if use_color { " X " } else { plain }, style),
+            Span::raw(format!(" {what}")),
+        ]))
+    };
+    let black_on = |bg: Color| {
+        Style::default()
+            .fg(Color::Black)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD)
+    };
+    let (tagline, rules, controls) = match mode {
+        GameMode::Jotto => (
+            "guess the five-letter word, unlimited guesses",
+            vec![
+                bullet("The secret word has 5 different letters and isn't a proper noun."),
+                bullet("Each guess scores how many letters it shares with it, in any spot."),
+                bullet("Mark letters in the scratch pad as you rule them in or out."),
+            ],
+            vec![
+                HelpLine::Keys(vec![
+                    ("Enter", "guess"),
+                    ("Tab", "scratch pad"),
+                    ("click", "mark a letter"),
+                ]),
+                HelpLine::Keys(vec![("↑↓", "scroll"), ("?", "help"), ("Esc", "quit")]),
+            ],
+        ),
+        GameMode::Wordle => (
+            "find the five-letter word in six guesses",
+            vec![
+                bullet("Letters may repeat; the word isn't a proper noun or a plural."),
+                tile("+X+", black_on(COLOR_POSITIVE), "in the word, in this spot"),
+                tile(
+                    "?X?",
+                    black_on(COLOR_WARNING),
+                    "in the word, in another spot",
+                ),
+                tile(
+                    "~X~",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::CROSSED_OUT),
+                    "not in the word",
+                ),
+            ],
+            vec![HelpLine::Keys(vec![
+                ("Enter", "guess"),
+                ("↑↓", "scroll"),
+                ("?", "help"),
+                ("Esc", "quit"),
+            ])],
+        ),
+    };
+    let mut controls = controls;
+    controls.push(HelpLine::Keys(vec![
+        ("^N", "new"),
+        ("^T", "daily"),
+        ("^G", "give up"),
+        ("^D", "difficulty"),
+    ]));
+    let levels = [
+        (D::Easy, "Easy (35)", "recommended small dictionary"),
+        (D::Medium, "Medium (50)", "recommended medium dictionary"),
+        (D::Hard, "Hard (70)", "recommended large dictionary"),
+        (
+            D::Scrabble,
+            "Scrabble (80)",
+            "strange and unusual word-game words",
+        ),
+        (
+            D::Insane,
+            "Insane (95)",
+            "every valid 5-letter English word",
+        ),
+    ]
+    .into_iter()
+    .map(|(d, name, desc)| HelpLine::Row {
+        name: name.to_string(),
+        desc: desc.to_string(),
+        note: format!(
+            "{} words",
+            crate::contexto::game::grouped(dict::word_count(mode, d.scowl_size()))
+        ),
+    })
+    .collect();
+    let mut credits = vec![
+        HelpLine::Credit("By", "Gus Lipkin (https://guslipkin.me)".to_string()),
+        HelpLine::Credit("Words", "SCOWL (http://wordlist.aspell.net/)".to_string()),
+    ];
+    if mode == GameMode::Wordle {
+        credits.push(HelpLine::Credit(
+            "Wordle",
+            "by Josh Wardle: https://www.nytimes.com/games/wordle".to_string(),
+        ));
+    }
+    let page = HelpPage {
+        game: match mode {
+            GameMode::Jotto => "Jotto",
+            GameMode::Wordle => "Wordle",
+        },
+        tagline: tagline.to_string(),
+        sections: vec![
+            HelpSection {
+                title: "Rules",
+                lines: rules,
+            },
+            HelpSection {
+                title: "Controls",
+                lines: controls,
+            },
+            HelpSection {
+                title: "Difficulty (SCOWL size) · daily: Scrabble",
+                lines: levels,
+            },
+            HelpSection {
+                title: "Credits",
+                lines: credits,
+            },
+        ],
+    };
+    draw_help_page(f, &page);
 }
 
 pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -1655,4 +1655,49 @@ pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn render(app: &mut TuiApp, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| draw_ui(f, app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn help_fits_a_small_terminal_and_spreads_on_a_wide_one() {
+        for (mode, extra) in [
+            (GameMode::Jotto, "scratch pad"),
+            (GameMode::Wordle, "Josh Wardle"),
+        ] {
+            let game =
+                GameState::new_with_mode(mode, crate::game::Difficulty::Scrabble, None).unwrap();
+            let mut app = TuiApp::new(game);
+            app.show_help = true;
+            for (w, h) in [(80, 24), (130, 34)] {
+                let screen = render(&mut app, w, h);
+                if std::env::var_os("JOTTO_SHOW_TUI").is_some() {
+                    println!("{screen}");
+                }
+                for text in [
+                    "How to Play",
+                    "Controls",
+                    "Insane (95)",
+                    "SCOWL",
+                    extra,
+                    "to close",
+                ] {
+                    assert!(screen.contains(text), "{mode:?} at {w}x{h}: no '{text}'");
+                }
+            }
+        }
+    }
 }

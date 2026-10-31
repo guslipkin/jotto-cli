@@ -1,4 +1,4 @@
-# PowerShell installer script for jotto, wordle, and contexto (https://github.com/guslipkin/jotto-cli)
+# PowerShell installer script for jotto, wordle, contexto, and flights (https://github.com/guslipkin/jotto-cli)
 #
 # Usage:
 #   irm https://raw.githubusercontent.com/guslipkin/jotto-cli/main/install.ps1 | iex
@@ -6,7 +6,7 @@
 $ErrorActionPreference = 'Stop'
 
 $Repo = "guslipkin/jotto-cli"
-$Binaries = @("jotto.exe", "wordle.exe", "contexto.exe")
+$Binaries = @("jotto.exe", "wordle.exe", "contexto.exe", "flights.exe")
 $InstallDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $HOME ".local\bin" }
 $Version = if ($env:VERSION) { $env:VERSION } else { "latest" }
 $AssetName = "windows-x86_64"

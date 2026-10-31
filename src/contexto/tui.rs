@@ -7,16 +7,17 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::contexto::data::lexicon;
 use crate::contexto::game::{bar_filled, grouped, Closeness, ContextoGame, Difficulty, Status};
 use crate::game::supports_color;
+use crate::help::{draw_help_page, HelpLine, HelpPage, HelpSection};
 use crate::save::Autosave;
 use crate::tui::{
-    centered_rect, enter_tui, notice_color, rect_contains, COLOR_ACCENT, COLOR_NEGATIVE,
-    COLOR_POSITIVE, COLOR_WARNING, MIN_RECOMMENDED_WIDTH,
+    enter_tui, notice_color, rect_contains, COLOR_ACCENT, COLOR_NEGATIVE, COLOR_POSITIVE,
+    COLOR_WARNING, MIN_RECOMMENDED_WIDTH,
 };
 
 /// Background of the highlighted row in the guess list. A gray background rather
@@ -642,68 +643,84 @@ fn draw_ui(f: &mut Frame, app: &mut ContextoApp) {
     }
 }
 
-fn difficulty_line(d: Difficulty) -> Line<'static> {
-    Line::from(format!(
-        "  • {}: {} ({} answers)",
-        d.label(),
-        d.description(),
-        grouped(d.secret_count())
-    ))
-}
-
-/// Kept to 19 lines and 68 columns, so it fits whole in an 80x24 terminal.
+/// The help page: rules with the closeness colours, controls, levels, credits.
 fn draw_help(f: &mut Frame, use_color: bool) {
-    let area = centered_rect(90, 90, f.area());
-    f.render_widget(Clear, area);
-    let heading = Style::default()
-        .fg(COLOR_ACCENT)
-        .add_modifier(Modifier::BOLD);
-    let example = |rank: usize, text: &'static str| {
-        let mut spans = vec![Span::raw("  • ")];
-        spans.extend(bar_spans(rank, 10, use_color));
-        spans.push(Span::raw(text));
-        Line::from(spans)
+    let lex = lexicon();
+    let mut closeness = vec![];
+    for (rank, label) in [
+        (50, " Close ≤#300  "),
+        (800, " Warm ≤#1,500  "),
+        (8000, " Far"),
+    ] {
+        closeness.extend(bar_spans(rank, 6, use_color));
+        closeness.push(Span::raw(label));
+    }
+    let page = HelpPage {
+        game: "Contexto",
+        tagline: "find the secret noun by its meaning".to_string(),
+        sections: vec![
+            HelpSection {
+                title: "Rules",
+                lines: vec![
+                    HelpLine::Bullet(Line::from(format!(
+                        "{} words accepted, ranked out of {}; #1 is the answer.",
+                        grouped(lex.guessable_count()),
+                        grouped(lex.ranked_count())
+                    ))),
+                    HelpLine::Bullet(Line::from(
+                        "Plurals and other forms count as their base ('mice' is 'mouse').",
+                    )),
+                    HelpLine::Bullet(Line::from(
+                        "Closeness comes from usage, so a shared topic counts too.",
+                    )),
+                    HelpLine::Bullet(Line::from(closeness)),
+                    HelpLine::Bullet(Line::from(
+                        "A hint shows the word at half your best guess's rank.",
+                    )),
+                ],
+            },
+            HelpSection {
+                title: "Controls",
+                lines: vec![
+                    HelpLine::Keys(vec![
+                        ("Enter", "guess"),
+                        ("Tab", "hint"),
+                        ("↑↓", "scroll"),
+                        ("Esc", "quit"),
+                    ]),
+                    HelpLine::Keys(vec![
+                        ("^N", "new"),
+                        ("^T", "daily (medium)"),
+                        ("^G", "give up"),
+                        ("^D", "difficulty"),
+                    ]),
+                ],
+            },
+            HelpSection {
+                title: "Difficulty · possible answers",
+                lines: [Difficulty::Easy, Difficulty::Medium, Difficulty::Hard]
+                    .iter()
+                    .map(|&d| HelpLine::Row {
+                        name: d.label().to_string(),
+                        desc: d.description().to_string(),
+                        note: grouped(d.secret_count()),
+                    })
+                    .collect(),
+            },
+            HelpSection {
+                title: "Credits",
+                lines: vec![
+                    HelpLine::Credit("By", "Gus Lipkin (https://guslipkin.me)".to_string()),
+                    HelpLine::Credit("Inspired by", "Contexto: https://contexto.me/".to_string()),
+                    HelpLine::Credit(
+                        "Data",
+                        "Words: SCOWL. Meanings: GloVe. Difficulty: WordNet.".to_string(),
+                    ),
+                ],
+            },
+        ],
     };
-    let help = vec![
-        Line::from(Span::styled("How to Play Contexto", heading)),
-        Line::from("Find the secret noun by its meaning. Guesses are unlimited."),
-        Line::from(format!(
-            "  • {} words accepted, ranked out of {}; #1 is the answer.",
-            grouped(lexicon().guessable_count()),
-            grouped(lexicon().ranked_count())
-        )),
-        Line::from("  • Plurals and other forms count as their base ('mice' is 'mouse')."),
-        Line::from("  • Closeness comes from usage, so a shared topic counts too."),
-        example(50, " Close: #300 or better"),
-        example(800, " Warm: #301 to #1,500"),
-        example(8000, " Far: beyond #1,500"),
-        Line::from("  • [Tab] Hint: the word at half your best guess's rank."),
-        Line::from("  • [^T] Daily: the same word for everyone each UTC day (medium)."),
-        Line::from(Span::styled(
-            "Difficulty: possible answers ([^D] or --difficulty)",
-            heading,
-        )),
-        difficulty_line(Difficulty::Easy),
-        difficulty_line(Difficulty::Medium),
-        difficulty_line(Difficulty::Hard),
-        Line::from(Span::styled("Credits", heading)),
-        Line::from("  • By Gus Lipkin (https://guslipkin.me)"),
-        Line::from("  • Inspired by Contexto: https://contexto.me/"),
-        Line::from("  • Words: SCOWL. Meanings: GloVe. Difficulty: WordNet."),
-        Line::from(Span::styled(
-            "Click anywhere or press [Esc] / [Enter] to close",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-    f.render_widget(
-        Paragraph::new(help).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Help & Credits ")
-                .border_style(Style::default().fg(COLOR_ACCENT)),
-        ),
-        area,
-    );
+    draw_help_page(f, &page);
 }
 
 #[cfg(test)]
@@ -760,7 +777,7 @@ mod tests {
         if std::env::var_os("CONTEXTO_SHOW_TUI").is_some() {
             println!("{screen}");
         }
-        for text in ["How to Play", "Hard: adds ideas", "WordNet", "to close"] {
+        for text in ["How to Play", "Hard", "adds ideas", "WordNet", "to close"] {
             assert!(screen.contains(text), "help is cut off before '{text}'");
         }
     }

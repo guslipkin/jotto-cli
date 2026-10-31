@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, Write};
+use std::io;
 use std::str::FromStr;
 
 use crate::contexto::data::lexicon;
@@ -7,6 +7,7 @@ use crate::contexto::game::{
 };
 use crate::contexto::tui::closeness_color;
 use crate::game::supports_color;
+use crate::line_input::LineReader;
 use crate::save::Autosave;
 use crate::tui::ansi_rgb;
 
@@ -18,8 +19,6 @@ const NEAREST_SHOWN: usize = 15;
 
 /// Runs the line-by-line REPL / Plain CLI mode.
 pub fn run(mut game: ContextoGame, autosave: &mut Autosave) -> io::Result<()> {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
     let use_color = supports_color();
     let lex = lexicon();
 
@@ -47,18 +46,14 @@ pub fn run(mut game: ContextoGame, autosave: &mut Autosave) -> io::Result<()> {
         }
     }
 
-    let mut lines = stdin.lock().lines();
+    let mut reader = LineReader::new();
     loop {
         // Every command and guess comes back here, so this saves each change.
         autosave.sync(&game.to_saved());
-        print!("contexto> ");
-        stdout.flush()?;
-
-        let Some(line_res) = lines.next() else {
+        let Some(raw_line) = reader.read_line("contexto> ")? else {
             println!();
             break;
         };
-        let raw_line = line_res?;
         let lower = raw_line.trim().to_ascii_lowercase();
         if lower.is_empty() {
             continue;
