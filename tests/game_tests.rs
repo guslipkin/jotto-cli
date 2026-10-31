@@ -331,3 +331,50 @@ fn test_daily_mode_determinism_and_cooldown_both_modes() {
         assert!(daily_game.played_words_count() >= count_after_reset);
     }
 }
+
+#[test]
+fn test_jotto_zero_common_guess_scratches_its_letters() {
+    use jotto::game::{GameMode, ScratchState};
+    let mut game =
+        GameState::new_with_mode(GameMode::Jotto, Difficulty::Easy, Some("crane")).unwrap();
+    // A letter marked positive, then shown to be wrong, is scratched too.
+    game.toggle_scratch('m');
+    game.toggle_scratch('m');
+    assert_eq!(
+        game.scratched_letters()[(b'm' - b'a') as usize],
+        ScratchState::Positive
+    );
+    let round = game.make_guess("moist").unwrap();
+    assert_eq!(round.common, 0);
+    for c in "moist".bytes() {
+        assert_eq!(
+            game.scratched_letters()[(c - b'a') as usize],
+            ScratchState::ScratchedOut,
+            "{} wasn't scratched out",
+            c as char
+        );
+    }
+    // A guess with letters in common leaves the pad alone.
+    let before = *game.scratched_letters();
+    let round = game.make_guess("crate").unwrap();
+    assert!(round.common > 0);
+    assert_eq!(*game.scratched_letters(), before);
+    // The player can still change a scratched letter.
+    game.toggle_scratch('o');
+    assert_ne!(
+        game.scratched_letters()[(b'o' - b'a') as usize],
+        ScratchState::ScratchedOut
+    );
+}
+
+#[test]
+fn test_wordle_has_no_scratch_marks() {
+    use jotto::game::{GameMode, ScratchState};
+    let mut game =
+        GameState::new_with_mode(GameMode::Wordle, Difficulty::Easy, Some("crane")).unwrap();
+    game.make_guess("moist").unwrap();
+    assert!(game
+        .scratched_letters()
+        .iter()
+        .all(|&s| s == ScratchState::Default));
+}

@@ -549,6 +549,15 @@ impl GameState {
         };
         self.history.push(round.clone());
 
+        // A Jotto guess sharing no letters with the word rules every one of its
+        // letters out, so they're crossed off the scratch pad (the player can
+        // still change them back).
+        if self.mode == GameMode::Jotto && common == 0 {
+            for b in guess.bytes().filter(u8::is_ascii_lowercase) {
+                self.scratched_letters[(b - b'a') as usize] = ScratchState::ScratchedOut;
+            }
+        }
+
         if guess == self.secret_word {
             self.status = GameStatus::Won;
         } else if self.mode == GameMode::Wordle && self.history.len() >= MAX_WORDLE_GUESSES {

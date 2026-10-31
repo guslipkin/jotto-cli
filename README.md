@@ -9,6 +9,7 @@ Jotto is a word-deduction game where you try to guess the secret five-letter wor
 - The secret word has **5 unique letters** (no repeating letters).
 - The word is **not a proper noun**.
 - After each valid 5-letter guess, you are told **how many letters your guess shares in common** with the secret word (regardless of position).
+- A guess with **0 letters in common** rules all of its letters out, so they're scratched out (`~X~`) on the scratch pad for you; you can still change them.
 
 ### Wordle (`wordle`)
 Wordle gives you **6 guesses** to find the secret five-letter word:
@@ -42,6 +43,7 @@ Flights asks you to get from one airport to another by the shortest distance:
 
 - **Four Games, One Shared Codebase (`jotto`, `wordle`, `contexto` & `flights`)**:
   - **Full-screen Terminal UI (TUI)** by default with a live Guess box, Used Letters tracker (manual Scratch pad in Jotto; auto-colored letter states in Wordle), and History / 6-Guess Board; in Contexto, a closest-first list of guesses with colorblind-safe closeness bars; in Flights, a braille world map that fits itself to your route and options, and that you can pan and zoom.
+  - **Narrow screens** (under 80 columns, down to 36, such as a phone held upright): every TUI stacks its panels top to bottom instead of side by side, footer buttons take as many rows as their labels need, and the help page wraps.
   - **Plain / REPL Mode (`--plain`)** for line-by-line terminal sessions or non-TTY pipes. In a terminal, `Up` / `Down` bring back earlier guesses and commands, and `Left` / `Right`, `Home` / `End`, `Ctrl+A` / `Ctrl+E`, `Ctrl+U` / `Ctrl+K` edit the line; `Ctrl+D` on an empty line or `Ctrl+C` quits.
 - **Minimal Word Recycling**:
   - **Daily Mode (`--daily` or `Ctrl+T`)**: Uses a deterministic cooldown of 90% of the Scrabble (`80`) word list's size in days (well over a decade for both games) before any daily word can repeat.

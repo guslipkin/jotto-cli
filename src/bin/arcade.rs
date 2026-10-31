@@ -222,6 +222,9 @@ fn draw(f: &mut Frame, selected: usize, note: Option<&str>) -> [Rect; ROWS] {
         .unwrap_or(0)
         .max(FOOTER.chars().count());
     let width = (longest as u16 + 4).min(f.area().width);
+    // Too narrow for a description beside its game (a phone held upright, say):
+    // it goes on the line below instead, which is blank otherwise.
+    let stacked = usize::from(width) < longest + 4;
     let height = (ROWS as u16 * 2 + 8).min(f.area().height);
     let area = Rect {
         x: f.area().x + (f.area().width - width) / 2,
@@ -279,12 +282,22 @@ fn draw(f: &mut Frame, selected: usize, note: Option<&str>) -> [Rect; ROWS] {
         } else {
             Style::default().fg(Color::White)
         };
-        lines.push(Line::from(vec![
-            Span::styled(marker, Style::default().fg(ACCENT)),
-            Span::styled(format!(" {label:<12}"), style),
-            Span::styled(format!("  {about}"), Style::default().fg(Color::Gray)),
-        ]));
-        lines.push(Line::from(""));
+        let about = Span::styled(about, Style::default().fg(Color::Gray));
+        if stacked {
+            lines.push(Line::from(vec![
+                Span::styled(marker, Style::default().fg(ACCENT)),
+                Span::styled(format!(" {label:<12}"), style),
+            ]));
+            lines.push(Line::from(vec![Span::raw("      "), about]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(marker, Style::default().fg(ACCENT)),
+                Span::styled(format!(" {label:<12}"), style),
+                Span::raw("  "),
+                about,
+            ]));
+            lines.push(Line::from(""));
+        }
     }
     f.render_widget(Paragraph::new(lines), rows[1]);
     // Each row is a line, after a blank one, with a blank between rows; a row
@@ -310,6 +323,10 @@ fn draw(f: &mut Frame, selected: usize, note: Option<&str>) -> [Rect; ROWS] {
             )),
             rows[2],
         );
+    }
+    // True black behind everything, unless colours are off.
+    if jotto::game::supports_color() {
+        jotto::tui::paint_background(f.buffer_mut());
     }
     items
 }
@@ -368,6 +385,27 @@ mod tests {
             "the gap between rows"
         );
         assert_eq!(row_at(&items, 0, 0), None);
+    }
+
+    #[test]
+    fn narrow_screens_put_descriptions_under_names() {
+        let mut terminal = Terminal::new(TestBackend::new(44, 30)).unwrap();
+        let mut items = [Rect::default(); ROWS];
+        terminal.draw(|f| items = draw(f, 0, None)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let line = |y: u16| (0..44u16).map(|x| buf[(x, y)].symbol()).collect::<String>();
+        for (i, &(_, name, about)) in GAMES.iter().enumerate() {
+            assert!(line(items[i].y).contains(name), "row {i} isn't {name}");
+            // The description is under its name, whole when it fits.
+            let below = line(items[i].y + 1);
+            let shown: String = about.chars().take(30).collect();
+            assert!(
+                below.contains(&shown),
+                "'{about}' isn't under {name}: {below}"
+            );
+        }
+        // The rows are still where a click finds them.
+        assert_eq!(row_at(&items, items[1].x + 3, items[1].y), Some(1));
     }
 
     #[test]

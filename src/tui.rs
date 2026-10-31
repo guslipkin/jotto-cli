@@ -30,8 +30,85 @@ pub(crate) const COLOR_POSITIVE: Color = Color::Rgb(0, 158, 115); // Bluish-Gree
 pub(crate) const COLOR_NEGATIVE: Color = Color::Rgb(213, 94, 0); // Vermilion / Orange-Red (#D55E00)
 pub(crate) const COLOR_WARNING: Color = Color::Rgb(230, 159, 0); // Orange (#E69F00)
 
-/// Minimum recommended terminal width in columns.
-pub(crate) const MIN_RECOMMENDED_WIDTH: u16 = 70;
+/// The background every TUI paints: true black (RGB 0, 0, 0, pixels off) rather
+/// than the terminal's own background or its palette's "black", which many
+/// themes make a dark gray.
+pub const COLOR_BACKGROUND: Color = Color::Rgb(0, 0, 0);
+
+/// Gives every cell of `buf` without a background of its own the true-black
+/// [`COLOR_BACKGROUND`]. Run after a frame is drawn, so it reaches the cells a
+/// modal cleared back to the terminal's default too.
+pub fn paint_background(buf: &mut ratatui::buffer::Buffer) {
+    for cell in buf.content.iter_mut() {
+        if cell.bg == Color::Reset {
+            cell.set_bg(COLOR_BACKGROUND);
+        }
+    }
+}
+
+/// Minimum recommended terminal width in columns: narrower than this, a TUI
+/// shows a note instead. Low enough for a phone held upright.
+pub(crate) const MIN_RECOMMENDED_WIDTH: u16 = 36;
+
+/// Below this width a TUI stacks its panels top to bottom rather than side by
+/// side, as on a phone held upright or a narrow window.
+pub(crate) const NARROW_WIDTH: u16 = 80;
+
+/// Where `actions`' footer buttons go in `area`: in as few rows as let each
+/// show its "[key] label" whole inside its border, the rows as evenly filled as
+/// can be (so seven buttons go 4 + 3, not 6 + 1).
+pub(crate) fn footer_areas(area: Rect, actions: &[(&str, &str)]) -> Vec<Rect> {
+    let rows = footer_rows(area.width, actions);
+    let per_row = actions.len().div_ceil(rows).max(1);
+    let row_areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Length(3); rows])
+        .split(area);
+    actions
+        .chunks(per_row)
+        .zip(row_areas.iter())
+        .flat_map(|(row, &row_area)| {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(vec![Constraint::Ratio(1, row.len() as u32); row.len()])
+                .split(row_area)
+                .to_vec()
+        })
+        .collect()
+}
+
+/// Rows of footer buttons a terminal `width` wide needs for `actions`.
+fn footer_rows(width: u16, actions: &[(&str, &str)]) -> usize {
+    // "[key] label" plus a border either side.
+    let need = actions
+        .iter()
+        .map(|(key, label)| key.chars().count() + 1 + label.chars().count() + 2)
+        .max()
+        .unwrap_or(1);
+    let fit = (usize::from(width) / need).clamp(1, actions.len().max(1));
+    actions.len().div_ceil(fit).max(1)
+}
+
+/// Height of the footer [`footer_areas`] lays out.
+pub(crate) fn footer_height(width: u16, actions: &[(&str, &str)]) -> u16 {
+    footer_rows(width, actions) as u16 * 3
+}
+
+/// Draws one footer button: its key in the accent colour, then its label.
+pub(crate) fn draw_footer_button(f: &mut Frame, area: Rect, key: &str, label: &str) {
+    let btn = Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!("{key} "),
+            Style::default()
+                .fg(COLOR_ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(label.to_string(), Style::default().fg(Color::White)),
+    ]))
+    .alignment(Alignment::Center)
+    .block(Block::default().borders(Borders::ALL));
+    f.render_widget(btn, area);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusPanel {
@@ -225,7 +302,7 @@ impl TuiApp {
                     GameStatus::Playing | GameStatus::GivenUp => {
                         let status_msg = match mode {
                             GameMode::Jotto => format!(
-                                "Round {}: '{}' has {} {} in common.",
+                                "Round {}: '{}' has {} {} in common.{}",
                                 round.round,
                                 round.guess.to_ascii_uppercase(),
                                 round.common,
@@ -233,6 +310,11 @@ impl TuiApp {
                                     "letter"
                                 } else {
                                     "letters"
+                                },
+                                if round.common == 0 {
+                                    " Its letters are scratched out."
+                                } else {
+                                    ""
                                 }
                             ),
                             GameMode::Wordle => {
@@ -796,7 +878,15 @@ fn run_event_loop(
     }
 }
 
+/// Draws a frame, on true black when colours are on (see [`paint_background`]).
 fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
+    draw_screen(f, app);
+    if app.use_color {
+        paint_background(f.buffer_mut());
+    }
+}
+
+fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
     let mode = app.game.mode();
     let mode_title = format!(" {} ", mode.title());
 
@@ -843,62 +933,16 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
         return;
     }
 
-    let single_row_constraints = [Constraint::Ratio(1, 7); 7];
-    let preview_single_row = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(single_row_constraints)
-        .split(f.area());
+    let footer_actions: Vec<(&str, &str)> =
+        FOOTER_ACTIONS.iter().map(|&(_, k, l)| (k, l)).collect();
+    let footer_height = footer_height(f.area().width, &footer_actions);
 
-    let single_row_text_wraps =
-        FOOTER_ACTIONS
-            .iter()
-            .enumerate()
-            .any(|(i, &(_, key_hint, label))| {
-                let inner_w = preview_single_row[i].width.saturating_sub(2);
-                (key_hint.len() + 1 + label.len()) as u16 > inner_w
-            });
-
-    let stack_needs_wrap = FOOTER_ACTIONS
-        .iter()
-        .enumerate()
-        .any(|(i, &(_, key_hint, label))| {
-            let inner_w = preview_single_row[i].width.saturating_sub(2);
-            key_hint.len().max(label.len()) as u16 > inner_w
-        });
-
-    let (footer_height, footer_text_wraps) = if !stack_needs_wrap {
-        let h = if single_row_text_wraps { 4 } else { 3 };
-        (h, single_row_text_wraps)
-    } else {
-        let preview_top = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Ratio(1, 4); 4])
-            .split(f.area());
-        let preview_bot = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Ratio(1, 3); 3])
-            .split(f.area());
-        let stacked_text_wraps =
-            FOOTER_ACTIONS
-                .iter()
-                .enumerate()
-                .any(|(i, &(_, key_hint, label))| {
-                    let area = if i < 4 {
-                        preview_top[i]
-                    } else {
-                        preview_bot[i - 4]
-                    };
-                    let inner_w = area.width.saturating_sub(2);
-                    (key_hint.len() + 1 + label.len()) as u16 > inner_w
-                });
-        let row_h = if stacked_text_wraps { 4 } else { 3 };
-        (row_h * 2, stacked_text_wraps)
-    };
-
+    // A narrow screen wraps the header onto a second line rather than cut it.
+    let narrow = f.area().width < NARROW_WIDTH;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(if narrow { 4 } else { 3 }),
             Constraint::Min(14),
             Constraint::Length(footer_height),
         ])
@@ -947,20 +991,34 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
                 .add_modifier(Modifier::BOLD),
         ),
     ]);
-    let header =
-        Paragraph::new(Line::from(header_spans)).block(Block::default().borders(Borders::ALL));
+    let header = Paragraph::new(Line::from(header_spans))
+        .wrap(Wrap { trim: true })
+        .block(Block::default().borders(Borders::ALL));
     f.render_widget(header, chunks[0]);
 
-    // Main split body (Left: Input + Used Letters [+ Scratch] + Status, Right: History / Wordle Board)
-    let body_constraints = if f.area().width < 86 {
-        [Constraint::Length(41), Constraint::Min(24)]
+    // Main split body (Left: Input + Used Letters [+ Scratch] + Status, Right: History / Wordle Board).
+    // On a narrow screen the left column's boxes go on top, at their own heights,
+    // and the history or board fills the rest below.
+    let body_chunks = if narrow {
+        let stack_h = match mode {
+            GameMode::Jotto => 3 + 7 + 7 + 6,
+            GameMode::Wordle => 3 + 7 + 6,
+        };
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(stack_h), Constraint::Min(6)])
+            .split(chunks[1])
     } else {
-        [Constraint::Percentage(48), Constraint::Percentage(52)]
+        let body_constraints = if f.area().width < 86 {
+            [Constraint::Length(41), Constraint::Min(24)]
+        } else {
+            [Constraint::Percentage(48), Constraint::Percentage(52)]
+        };
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(body_constraints)
+            .split(chunks[1])
     };
-    let body_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(body_constraints)
-        .split(chunks[1]);
 
     let (guess_rect, used_rect, scratch_rect, status_rect) = match mode {
         GameMode::Jotto => {
@@ -1452,58 +1510,11 @@ fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
         }
     }
 
-    // Clickable Footer Buttons
-    let button_areas: [Rect; 7] = if !stack_needs_wrap {
-        let row = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(single_row_constraints)
-            .split(chunks[2]);
-        std::array::from_fn(|i| row[i])
-    } else {
-        let row_h = footer_height / 2;
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(row_h), Constraint::Length(row_h)])
-            .split(chunks[2]);
-        let top = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Ratio(1, 4); 4])
-            .split(rows[0]);
-        let bot = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Ratio(1, 3); 3])
-            .split(rows[1]);
-        std::array::from_fn(|i| if i < 4 { top[i] } else { bot[i - 4] })
-    };
-
+    // Clickable Footer Buttons, in as many rows as the width needs.
+    let button_areas = footer_areas(chunks[2], &footer_actions);
     for (i, &(_, key_hint, label)) in FOOTER_ACTIONS.iter().enumerate() {
         app.footer_buttons[i] = button_areas[i];
-        let btn_lines = if !footer_text_wraps {
-            vec![Line::from(vec![
-                Span::styled(
-                    format!("{key_hint} "),
-                    Style::default()
-                        .fg(COLOR_ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(label, Style::default().fg(Color::White)),
-            ])]
-        } else {
-            vec![
-                Line::from(Span::styled(
-                    key_hint,
-                    Style::default()
-                        .fg(COLOR_ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(label, Style::default().fg(Color::White))),
-            ]
-        };
-        let btn = Paragraph::new(btn_lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL));
-        f.render_widget(btn, button_areas[i]);
+        draw_footer_button(f, button_areas[i], key_hint, label);
     }
 
     // Help & Credits Modal
@@ -1675,6 +1686,38 @@ mod tests {
             .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn narrow_screens_stack_top_to_bottom() {
+        for (mode, board) in [(GameMode::Jotto, "History"), (GameMode::Wordle, "Board")] {
+            let game =
+                GameState::new_with_mode(mode, crate::game::Difficulty::Scrabble, None).unwrap();
+            let mut app = TuiApp::new(game);
+            let screen = render(&mut app, 44, 50);
+            if std::env::var_os("JOTTO_SHOW_TUI").is_some() {
+                println!("{screen}");
+            }
+            assert!(
+                !screen.contains("Too Narrow"),
+                "{mode:?} refused a phone-sized screen"
+            );
+            // The guess box sits above the history or board, not beside it.
+            let row = |text: &str| screen.lines().position(|l| l.contains(text));
+            let guess = row("Guess").expect("no guess box");
+            let below = row(board).unwrap_or_else(|| panic!("{mode:?}: no {board}"));
+            assert!(
+                guess < below,
+                "{mode:?}: the {board} isn't below the guess box"
+            );
+            // Every footer button is on screen, label whole.
+            for (_, key, label) in FOOTER_ACTIONS {
+                assert!(
+                    screen.contains(&format!("{key} {label}")),
+                    "{mode:?}: '{label}' is cut"
+                );
+            }
+        }
     }
 
     #[test]

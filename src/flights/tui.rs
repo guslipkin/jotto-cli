@@ -23,8 +23,9 @@ use crate::game::supports_color;
 use crate::help::{draw_help_page, HelpLine, HelpPage, HelpSection};
 use crate::save::Autosave;
 use crate::tui::{
-    centered_rect, enter_tui, notice_color, rect_contains, COLOR_ACCENT, COLOR_POSITIVE,
-    COLOR_WARNING, MIN_RECOMMENDED_WIDTH,
+    centered_rect, draw_footer_button, enter_tui, footer_areas, footer_height, notice_color,
+    rect_contains, COLOR_ACCENT, COLOR_POSITIVE, COLOR_WARNING, MIN_RECOMMENDED_WIDTH,
+    NARROW_WIDTH,
 };
 
 /// The destination's colour: Okabe-Ito reddish purple, apart from the palette's
@@ -121,8 +122,6 @@ enum FooterAction {
 }
 
 const FOOTER_COUNT: usize = 7;
-/// Buttons on the footer's first row when it needs two.
-const FOOTER_SPLIT: usize = 4;
 
 const FOOTER_ACTIONS: [(FooterAction, &str, &str); FOOTER_COUNT] = [
     (FooterAction::Help, "[?]", "Help"),
@@ -845,7 +844,16 @@ fn run_event_loop(
     }
 }
 
+/// Draws a frame, on true black when colours are on (see
+/// [`crate::tui::paint_background`]).
 fn draw_ui(f: &mut Frame, app: &mut FlightsApp) {
+    draw_screen(f, app);
+    if app.use_color {
+        crate::tui::paint_background(f.buffer_mut());
+    }
+}
+
+fn draw_screen(f: &mut Frame, app: &mut FlightsApp) {
     let title = " FLIGHTS ";
 
     if f.area().width < MIN_RECOMMENDED_WIDTH {
@@ -883,20 +891,17 @@ fn draw_ui(f: &mut Frame, app: &mut FlightsApp) {
         return;
     }
 
-    // Footer on one row when every button's "[key] label" fits, else on two.
-    let one_row = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Ratio(1, FOOTER_COUNT as u32); FOOTER_COUNT])
-        .split(f.area());
-    let fits_one_row = FOOTER_ACTIONS.iter().enumerate().all(|(i, &(_, k, l))| {
-        (k.len() + 1 + l.len()) as u16 <= one_row[i].width.saturating_sub(2)
-    });
-    let footer_height = if fits_one_row { 3 } else { 6 };
+    // The footer's buttons take as many rows as their labels need; a narrow
+    // screen stacks everything top to bottom and wraps the header.
+    let footer_actions: Vec<(&str, &str)> =
+        FOOTER_ACTIONS.iter().map(|&(_, k, l)| (k, l)).collect();
+    let footer_height = footer_height(f.area().width, &footer_actions);
+    let narrow = f.area().width < NARROW_WIDTH;
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(if narrow { 4 } else { 3 }),
             Constraint::Min(12),
             Constraint::Length(footer_height),
         ])
@@ -905,7 +910,38 @@ fn draw_ui(f: &mut Frame, app: &mut FlightsApp) {
     draw_header(f, app, title, chunks[0]);
 
     let over = app.game.status() != Status::Playing;
-    let status_area = if app.game.rules().shows_map() {
+    // Once the game is over there are no options, so the routes get the room.
+    let options_height = if over {
+        Constraint::Length(3)
+    } else {
+        Constraint::Min(4)
+    };
+    let status_area = if narrow {
+        // One column: the map (if the level has one) on top, then the status,
+        // route and options, each the full width.
+        let map = if app.game.rules().shows_map() {
+            Constraint::Percentage(40)
+        } else {
+            Constraint::Length(0)
+        };
+        let col = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                map,
+                Constraint::Length(5),
+                Constraint::Min(4),
+                options_height,
+            ])
+            .split(chunks[1]);
+        if app.game.rules().shows_map() {
+            draw_map(f, app, col[0]);
+        } else {
+            app.map_frame.set(None);
+        }
+        draw_route(f, app, col[2]);
+        draw_options(f, app, col[3]);
+        col[1]
+    } else if app.game.rules().shows_map() {
         // The map takes whatever the side column doesn't need, up to half.
         let side = side_width(app.game.rules()).min(chunks[1].width / 2);
         let body = Layout::default()
@@ -913,12 +949,6 @@ fn draw_ui(f: &mut Frame, app: &mut FlightsApp) {
             .constraints([Constraint::Min(0), Constraint::Length(side)])
             .split(chunks[1]);
         draw_map(f, app, body[0]);
-        // Once the game is over there are no options, so the routes get the room.
-        let options_height = if over {
-            Constraint::Length(3)
-        } else {
-            Constraint::Min(4)
-        };
         let right = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(5), Constraint::Min(4), options_height])
@@ -947,7 +977,11 @@ fn draw_ui(f: &mut Frame, app: &mut FlightsApp) {
         right[0]
     };
     draw_status(f, app, status_area);
-    draw_footer(f, app, chunks[2], fits_one_row);
+    let button_areas = footer_areas(chunks[2], &footer_actions);
+    for (i, &(_, key_hint, label)) in FOOTER_ACTIONS.iter().enumerate() {
+        app.footer_buttons[i] = button_areas[i];
+        draw_footer_button(f, button_areas[i], key_hint, label);
+    }
 
     if let Some(page) = &app.settings {
         draw_settings(f, page);
@@ -997,7 +1031,9 @@ fn draw_header(f: &mut Frame, app: &FlightsApp, title: &'static str, area: Rect)
         ));
     }
     f.render_widget(
-        Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL)),
+        Paragraph::new(Line::from(spans))
+            .wrap(Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL)),
         area,
     );
 }
@@ -1633,52 +1669,6 @@ fn draw_map(f: &mut Frame, app: &FlightsApp, area: Rect) {
     // A canvas only writes the cells it draws in, so the map shows through.
     for (path, color) in finished {
         f.render_widget(path_canvas(path, color), inner);
-    }
-}
-
-fn draw_footer(f: &mut Frame, app: &mut FlightsApp, area: Rect, one_row: bool) {
-    let button_areas: [Rect; FOOTER_COUNT] = if one_row {
-        let row = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Ratio(1, FOOTER_COUNT as u32); FOOTER_COUNT])
-            .split(area);
-        std::array::from_fn(|i| row[i])
-    } else {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Length(3)])
-            .split(area);
-        let top = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Ratio(1, FOOTER_SPLIT as u32); FOOTER_SPLIT])
-            .split(rows[0]);
-        let rest = (FOOTER_COUNT - FOOTER_SPLIT) as u32;
-        let bot = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(vec![Constraint::Ratio(1, rest); rest as usize])
-            .split(rows[1]);
-        std::array::from_fn(|i| {
-            if i < FOOTER_SPLIT {
-                top[i]
-            } else {
-                bot[i - FOOTER_SPLIT]
-            }
-        })
-    };
-    for (i, &(_, key_hint, label)) in FOOTER_ACTIONS.iter().enumerate() {
-        app.footer_buttons[i] = button_areas[i];
-        let btn = Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!("{key_hint} "),
-                Style::default()
-                    .fg(COLOR_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(label, Style::default().fg(Color::White)),
-        ]))
-        .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::ALL));
-        f.render_widget(btn, button_areas[i]);
     }
 }
 
@@ -2572,8 +2562,46 @@ mod tests {
     #[test]
     fn narrow_terminal_shows_warning() {
         let mut app = app(Difficulty::Medium);
-        let screen = render(&mut app, 60, 20);
+        let screen = render(&mut app, 30, 20);
         assert!(screen.contains("Terminal Width Too Narrow"));
+    }
+
+    #[test]
+    fn narrow_screens_stack_top_to_bottom() {
+        for d in [Difficulty::Medium, Difficulty::Hard] {
+            let mut app = app(d);
+            let screen = render(&mut app, 44, 50);
+            show(&screen);
+            assert!(!screen.contains("Too Narrow"));
+            let row = |text: &str| screen.lines().position(|l| l.contains(text));
+            let status = row("Status").expect("no status");
+            let route = row("Route").expect("no route");
+            let options = row("Options").expect("no options");
+            assert!(
+                status < route && route < options,
+                "{d}: not stacked in order"
+            );
+            if d == Difficulty::Medium {
+                assert!(row(" Map ").unwrap() < status, "the map isn't on top");
+            } else {
+                assert!(row(" Map ").is_none(), "Hard has no map");
+            }
+            for (_, key, label) in FOOTER_ACTIONS {
+                assert!(
+                    screen.contains(&format!("{key} {label}")),
+                    "{d}: '{label}' is cut"
+                );
+            }
+            // The options can still be clicked: the first row flies there.
+            let first = app.game.options()[0].airport;
+            let area = app.options_area;
+            app.handle_mouse_click(area.x + 2, area.y);
+            assert_eq!(
+                app.game.current(),
+                first,
+                "{d}: clicking an option didn't fly"
+            );
+        }
     }
 
     #[test]

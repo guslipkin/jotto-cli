@@ -9,7 +9,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::tui::COLOR_ACCENT;
@@ -221,7 +221,23 @@ pub(crate) fn draw_help_page(f: &mut Frame, page: &HelpPage) {
     let (one_w, one_h) = frame(content_width, lines);
     let (two_w, two_h) = frame(content_width * 2 + 2, tallest_half);
     let two = one_h > screen.height && two_w <= screen.width && page.sections.len() > 1;
-    let (w, h) = if two { (two_w, two_h) } else { (one_w, one_h) };
+    let (w, mut h) = if two { (two_w, two_h) } else { (one_w, one_h) };
+    // Narrower than its content (a phone held upright, say), the page is as wide
+    // as the screen and its long lines wrap, so it grows taller to fit them.
+    let wraps = !two && w > screen.width;
+    let header_cells = 14 + page.game.chars().count() + page.tagline.chars().count();
+    let mut header_rows = 1;
+    if wraps {
+        let inner = usize::from(screen.width.saturating_sub(4).max(1));
+        let body: usize = page
+            .sections
+            .iter()
+            .flat_map(|s| section_lines(s, inner as u16))
+            .map(|l| l.width().max(1).div_ceil(inner))
+            .sum();
+        header_rows = header_cells.div_ceil(inner).max(1);
+        h = (body + header_rows) as u16 + 2;
+    }
     let area = Rect {
         x: screen.x + screen.width.saturating_sub(w) / 2,
         y: screen.y + screen.height.saturating_sub(h) / 2,
@@ -266,9 +282,9 @@ pub(crate) fn draw_help_page(f: &mut Frame, page: &HelpPage) {
     ]);
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .constraints([Constraint::Length(header_rows as u16), Constraint::Min(1)])
         .split(inner);
-    f.render_widget(Paragraph::new(header), rows[0]);
+    f.render_widget(Paragraph::new(header).wrap(Wrap { trim: true }), rows[0]);
 
     let column = |sections: &[HelpSection], width: u16| -> Vec<Line<'static>> {
         sections
@@ -294,10 +310,13 @@ pub(crate) fn draw_help_page(f: &mut Frame, page: &HelpPage) {
             cols[2],
         );
     } else {
-        f.render_widget(
-            Paragraph::new(column(&page.sections, rows[1].width)),
-            rows[1],
-        );
+        let body = Paragraph::new(column(&page.sections, rows[1].width));
+        let body = if wraps {
+            body.wrap(Wrap { trim: false })
+        } else {
+            body
+        };
+        f.render_widget(body, rows[1]);
     }
 }
 
@@ -328,6 +347,41 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(screen.contains(tagline), "the tagline was cut");
+    }
+
+    #[test]
+    fn a_narrow_screen_wraps_the_page_instead_of_cutting_it() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let long = "a rule long enough that it can't fit on one line of a phone's screen";
+        let page = HelpPage {
+            game: "Test",
+            tagline: "a tagline".to_string(),
+            sections: vec![
+                HelpSection {
+                    title: "Rules",
+                    lines: vec![HelpLine::Bullet(Line::from(long))],
+                },
+                HelpSection {
+                    title: "Credits",
+                    lines: vec![HelpLine::Credit("By", "someone".to_string())],
+                },
+            ],
+        };
+        let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
+        terminal.draw(|f| draw_help_page(f, &page)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        // Every word of the long rule is there, and the section after it.
+        for word in long.split(' ') {
+            assert!(screen.contains(word), "'{word}' was cut");
+        }
+        assert!(screen.contains("someone"), "the page was cut short");
     }
 
     #[test]

@@ -14,8 +14,9 @@ use crate::game::supports_color;
 use crate::help::{draw_help_page, HelpLine, HelpPage, HelpSection};
 use crate::save::Autosave;
 use crate::tui::{
-    enter_tui, notice_color, rect_contains, COLOR_ACCENT, COLOR_NEGATIVE, COLOR_POSITIVE,
-    COLOR_WARNING, MIN_RECOMMENDED_WIDTH,
+    draw_footer_button, enter_tui, footer_areas, footer_height, notice_color, rect_contains,
+    COLOR_ACCENT, COLOR_NEGATIVE, COLOR_POSITIVE, COLOR_WARNING, MIN_RECOMMENDED_WIDTH,
+    NARROW_WIDTH,
 };
 
 /// Background of the highlighted row in the guess list. A gray background rather
@@ -354,7 +355,16 @@ fn run_event_loop(
     }
 }
 
+/// Draws a frame, on true black when colours are on (see
+/// [`crate::tui::paint_background`]).
 fn draw_ui(f: &mut Frame, app: &mut ContextoApp) {
+    draw_screen(f, app);
+    if app.use_color {
+        crate::tui::paint_background(f.buffer_mut());
+    }
+}
+
+fn draw_screen(f: &mut Frame, app: &mut ContextoApp) {
     let title = " CONTEXTO ";
 
     if f.area().width < MIN_RECOMMENDED_WIDTH {
@@ -391,20 +401,17 @@ fn draw_ui(f: &mut Frame, app: &mut ContextoApp) {
         return;
     }
 
-    // Footer on one row when every button's "[key] label" fits, else on two (4 + 4).
-    let one_row = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Ratio(1, FOOTER_COUNT as u32); FOOTER_COUNT])
-        .split(f.area());
-    let fits_one_row = FOOTER_ACTIONS.iter().enumerate().all(|(i, &(_, k, l))| {
-        (k.len() + 1 + l.len()) as u16 <= one_row[i].width.saturating_sub(2)
-    });
-    let footer_height = if fits_one_row { 3 } else { 6 };
+    // The footer's buttons take as many rows as their labels need; a narrow
+    // screen stacks the panels and wraps the header.
+    let footer_actions: Vec<(&str, &str)> =
+        FOOTER_ACTIONS.iter().map(|&(_, k, l)| (k, l)).collect();
+    let footer_height = footer_height(f.area().width, &footer_actions);
+    let narrow = f.area().width < NARROW_WIDTH;
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(if narrow { 4 } else { 3 }),
             Constraint::Min(12),
             Constraint::Length(footer_height),
         ])
@@ -455,14 +462,24 @@ fn draw_ui(f: &mut Frame, app: &mut ContextoApp) {
         },
     ]);
     f.render_widget(
-        Paragraph::new(Line::from(header_spans)).block(Block::default().borders(Borders::ALL)),
+        Paragraph::new(Line::from(header_spans))
+            .wrap(Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL)),
         chunks[0],
     );
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(chunks[1]);
+    // The guess, latest and status boxes beside the list, or above it when narrow.
+    let body = if narrow {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3 + 4 + 5), Constraint::Min(6)])
+            .split(chunks[1])
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(chunks[1])
+    };
     let left = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -598,42 +615,11 @@ fn draw_ui(f: &mut Frame, app: &mut ContextoApp) {
     });
     f.render_stateful_widget(table, body[1], &mut app.table_state);
 
-    // Clickable footer buttons
-    let button_areas: [Rect; FOOTER_COUNT] = if fits_one_row {
-        let row = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Ratio(1, FOOTER_COUNT as u32); FOOTER_COUNT])
-            .split(chunks[2]);
-        std::array::from_fn(|i| row[i])
-    } else {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Length(3)])
-            .split(chunks[2]);
-        let top = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Ratio(1, 4); 4])
-            .split(rows[0]);
-        let bot = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Ratio(1, 4); 4])
-            .split(rows[1]);
-        std::array::from_fn(|i| if i < 4 { top[i] } else { bot[i - 4] })
-    };
+    // Clickable footer buttons, in as many rows as the width needs.
+    let button_areas = footer_areas(chunks[2], &footer_actions);
     for (i, &(_, key_hint, label)) in FOOTER_ACTIONS.iter().enumerate() {
         app.footer_buttons[i] = button_areas[i];
-        let btn = Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!("{key_hint} "),
-                Style::default()
-                    .fg(COLOR_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(label, Style::default().fg(Color::White)),
-        ]))
-        .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::ALL));
-        f.render_widget(btn, button_areas[i]);
+        draw_footer_button(f, button_areas[i], key_hint, label);
     }
 
     if app.show_help {
@@ -810,10 +796,11 @@ mod tests {
             let empty: Vec<_> = bar.iter().filter(|c| c.symbol() == " ").collect();
             assert!(!empty.is_empty(), "the bar has no unfilled part");
             assert_eq!(filled.len() + empty.len(), bar.len());
+            // Off the highlighted row, the screen's true black shows through.
             let want_bg = if highlighted {
                 HIGHLIGHT_BG
             } else {
-                Color::Reset
+                crate::tui::COLOR_BACKGROUND
             };
             for c in &empty {
                 assert_eq!(c.bg, want_bg, "the unfilled part has the wrong background");
@@ -822,10 +809,65 @@ mod tests {
     }
 
     #[test]
+    fn background_is_true_black_unless_colours_are_off() {
+        use crate::tui::COLOR_BACKGROUND;
+        for (use_color, help) in [(true, false), (true, true), (false, false)] {
+            let mut app = app_with_guesses("dog", &["cat"]);
+            app.use_color = use_color;
+            app.show_help = help;
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|f| draw_ui(f, &mut app)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            let unset = buf
+                .content()
+                .iter()
+                .filter(|c| c.bg == Color::Reset)
+                .count();
+            let black = buf
+                .content()
+                .iter()
+                .filter(|c| c.bg == COLOR_BACKGROUND)
+                .count();
+            if use_color {
+                // Every cell has a background, the help box's cleared ones included.
+                assert_eq!(
+                    unset, 0,
+                    "help {help}: {unset} cells kept the terminal's own"
+                );
+                assert!(black > 1000, "help {help}: only {black} black cells");
+            } else {
+                assert_eq!(black, 0, "colours are off, but the background was painted");
+            }
+        }
+    }
+
+    #[test]
     fn narrow_terminal_shows_warning() {
         let mut app = app_with_guesses("dog", &[]);
-        let screen = render(&mut app, 60, 20);
+        let screen = render(&mut app, 30, 20);
         assert!(screen.contains("Terminal Width Too Narrow"));
+    }
+
+    #[test]
+    fn narrow_screens_stack_top_to_bottom() {
+        let mut app = app_with_guesses("dog", &["animal", "horse"]);
+        let screen = render(&mut app, 44, 46);
+        if std::env::var_os("CONTEXTO_SHOW_TUI").is_some() {
+            println!("{screen}");
+        }
+        assert!(!screen.contains("Too Narrow"));
+        let row = |text: &str| screen.lines().position(|l| l.contains(text)).unwrap();
+        assert!(
+            row("Guess (any word)") < row("Closest Guesses"),
+            "the list isn't below"
+        );
+        assert!(screen.contains("HORSE") && screen.contains("ANIMAL"));
+        for (_, key, label) in FOOTER_ACTIONS {
+            assert!(
+                screen.contains(&format!("{key} {label}")),
+                "'{label}' is cut"
+            );
+        }
     }
 
     #[test]

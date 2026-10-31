@@ -85,9 +85,11 @@ EXPOSE 7681
 ENTRYPOINT ["/ttyd"]
 # --writable: ttyd's terminals are read-only by default. --max-clients bounds
 # how many play at once (each session runs its own menu and game); 0 is no limit.
+# The theme's black replaces ttyd's default dark gray behind the terminal.
 CMD ["--writable", "--port", "7681", "--max-clients", "32", \
      "--index", "/index.html", \
      "--client-option", "titleFixed=Arcade", \
      "--client-option", "disableLeaveAlert=true", \
      "--client-option", "scrollback=0", \
+     "--client-option", "theme={\"background\":\"#000000\"}", \
      "/arcade", "--session-saves"]
