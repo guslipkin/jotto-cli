@@ -638,7 +638,7 @@ pub(crate) fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
-fn wrapped_line_count(text: &str, max_width: u16) -> u16 {
+pub(crate) fn wrapped_line_count(text: &str, max_width: u16) -> u16 {
     let max_w = max_width.max(1) as usize;
     let mut total_lines = 0u16;
     for raw_line in text.lines() {

@@ -24,8 +24,8 @@ use crate::help::{draw_help_page, HelpLine, HelpPage, HelpSection};
 use crate::save::Autosave;
 use crate::tui::{
     centered_rect, draw_footer_button, enter_tui, footer_areas, footer_height, notice_color,
-    rect_contains, COLOR_ACCENT, COLOR_POSITIVE, COLOR_WARNING, MIN_RECOMMENDED_WIDTH,
-    NARROW_WIDTH,
+    rect_contains, wrapped_line_count, COLOR_ACCENT, COLOR_POSITIVE, COLOR_WARNING,
+    MIN_RECOMMENDED_WIDTH, NARROW_WIDTH,
 };
 
 /// The destination's colour: Okabe-Ito reddish purple, apart from the palette's
@@ -153,6 +153,13 @@ struct FlightsApp {
     map_frame: StdCell<Option<(Rect, Bounds)>>,
     /// Where a drag on the map began, and the view then.
     drag: Option<(u16, u16, Bounds)>,
+    /// How far the route box is scrolled once the player has scrolled it; `None`
+    /// shows its usual part (the end while playing, both routes from the top
+    /// after giving up). Dropped whenever the route changes.
+    route_scroll: Option<u16>,
+    /// Where the route box was last drawn, how far it was scrolled and how far
+    /// it could be (set while drawing, hence a `Cell`).
+    route_frame: StdCell<(Rect, u16, u16)>,
 }
 
 /// How much one zoom key press narrows the view.
@@ -352,6 +359,8 @@ impl FlightsApp {
             view: None,
             map_frame: StdCell::new(None),
             drag: None,
+            route_scroll: None,
+            route_frame: StdCell::new((Rect::default(), 0, 0)),
             should_quit: false,
             options_state: TableState::default(),
         };
@@ -360,6 +369,9 @@ impl FlightsApp {
     }
 
     fn reset_selection(&mut self) {
+        // Called on every change to the route but going back (which keeps the
+        // selection, and drops the scroll itself), so the box shows its new end.
+        self.route_scroll = None;
         let any = !self.game.options().is_empty();
         self.options_state = TableState::default().with_selected(any.then_some(0));
     }
@@ -447,6 +459,7 @@ impl FlightsApp {
         let net = self.game.network();
         match self.game.back() {
             Some(left) => {
+                self.route_scroll = None;
                 self.message = (
                     format!(
                         "Back at {} (left {}).",
@@ -596,6 +609,24 @@ impl FlightsApp {
     }
 
     /// Whether (`col`, `row`) is on the map.
+    fn on_route(&self, col: u16, row: u16) -> bool {
+        rect_contains(self.route_frame.get().0, col, row)
+    }
+
+    /// Scrolls the route box `lines` down (or up, negative), within its text.
+    fn scroll_route(&mut self, lines: i32) {
+        let (_, now, max) = self.route_frame.get();
+        let to = (i32::from(now) + lines).clamp(0, i32::from(max));
+        self.route_scroll = Some(to as u16);
+        self.route_frame
+            .set((self.route_frame.get().0, to as u16, max));
+    }
+
+    /// A page of the route box: its height less a line, so a line stays in view.
+    fn route_page(&self) -> i32 {
+        i32::from(self.route_frame.get().0.height.saturating_sub(3).max(1))
+    }
+
     fn on_map(&self, col: u16, row: u16) -> bool {
         self.game.rules().shows_map()
             && self
@@ -753,9 +784,10 @@ fn run_event_loop(
             Event::Mouse(mouse) => {
                 let (col, row) = (mouse.column, mouse.row);
                 let free = !app.show_help && app.settings.is_none();
-                // On the map, the wheel zooms and a drag pans; elsewhere the wheel
-                // moves the selection and a click acts.
+                // On the map, the wheel zooms and a drag pans; over the route it
+                // scrolls that; elsewhere it moves the selection and a click acts.
                 let on_map = free && app.on_map(col, row);
+                let on_route = free && app.on_route(col, row);
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) if on_map => {
                         app.drag = app.current_view().map(|(_, view)| (col, row, view));
@@ -767,6 +799,8 @@ fn run_event_loop(
                         app.zoom(1.0 / WHEEL_STEP, Some((col, row)))
                     }
                     MouseEventKind::ScrollDown if on_map => app.zoom(WHEEL_STEP, Some((col, row))),
+                    MouseEventKind::ScrollUp if on_route => app.scroll_route(-1),
+                    MouseEventKind::ScrollDown if on_route => app.scroll_route(1),
                     MouseEventKind::ScrollUp if free => app.move_selection(false),
                     MouseEventKind::ScrollDown if free => app.move_selection(true),
                     _ => {}
@@ -818,6 +852,8 @@ fn run_event_loop(
                     KeyCode::Char('s') if ctrl => app.open_settings(),
                     KeyCode::Up => app.move_selection(false),
                     KeyCode::Down => app.move_selection(true),
+                    KeyCode::PageUp => app.scroll_route(-app.route_page()),
+                    KeyCode::PageDown => app.scroll_route(app.route_page()),
                     // Left and Right step back and forward along the route: back a
                     // hop, or fly to the selected airport. Backspace and Enter do
                     // the same, for anyone used to them.
@@ -928,7 +964,7 @@ fn draw_screen(f: &mut Frame, app: &mut FlightsApp) {
             .direction(Direction::Vertical)
             .constraints([
                 map,
-                Constraint::Length(5),
+                status_height(app, chunks[1], 5),
                 Constraint::Min(4),
                 options_height,
             ])
@@ -951,7 +987,11 @@ fn draw_screen(f: &mut Frame, app: &mut FlightsApp) {
         draw_map(f, app, body[0]);
         let right = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(5), Constraint::Min(4), options_height])
+            .constraints([
+                status_height(app, body[1], 5),
+                Constraint::Min(4),
+                options_height,
+            ])
             .split(body[1]);
         draw_route(f, app, right[1]);
         draw_options(f, app, right[2]);
@@ -964,7 +1004,7 @@ fn draw_screen(f: &mut Frame, app: &mut FlightsApp) {
             .split(chunks[1]);
         let right = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(6), Constraint::Min(4)])
+            .constraints([status_height(app, body[1], 6), Constraint::Min(4)])
             .split(body[1]);
         // Once it's over, the routes take the options' half.
         if over {
@@ -1203,21 +1243,23 @@ fn draw_route(f: &mut Frame, app: &FlightsApp, area: Rect) {
         Status::GivenUp => " Game over · [^N] New Game ".to_string(),
     };
     let block = Block::default().borders(Borders::ALL).title(title);
-    // Keep the end of the route in view when it's longer than the box.
-    let inner_height = block.inner(area).height as usize;
-    if scroll_to_end {
-        let scroll = lines.len().saturating_sub(inner_height) as u16;
-        f.render_widget(Paragraph::new(lines).scroll((scroll, 0)).block(block), area);
-    } else {
-        // After giving up, both routes from the top, long lines wrapped so every
-        // stop's place shows.
-        f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .block(block),
-            area,
-        );
+    let inner_height = block.inner(area).height;
+    let mut paragraph = Paragraph::new(lines);
+    if !scroll_to_end {
+        // After giving up, long lines wrap so every stop's place shows.
+        paragraph = paragraph.wrap(Wrap { trim: false });
     }
+    let max = u16::try_from(paragraph.line_count(area.width.saturating_sub(2)))
+        .unwrap_or(u16::MAX)
+        .saturating_sub(inner_height);
+    // While playing, the end of the route stays in view; after giving up, both
+    // routes show from the top. Either way, until the player scrolls.
+    let scroll = app
+        .route_scroll
+        .unwrap_or(if scroll_to_end { max } else { 0 })
+        .min(max);
+    app.route_frame.set((area, scroll, max));
+    f.render_widget(paragraph.scroll((scroll, 0)).block(block), area);
 }
 
 fn draw_options(f: &mut Frame, app: &mut FlightsApp, area: Rect) {
@@ -1317,6 +1359,14 @@ fn draw_options(f: &mut Frame, app: &mut FlightsApp, area: Rect) {
             Style::default().add_modifier(Modifier::REVERSED)
         });
     f.render_stateful_widget(table, area, &mut app.options_state);
+}
+
+/// The status box's height in `column`: `least`, or more when the message
+/// wraps to more lines (as a give-up's whole shortest route can), up to half
+/// the column so the route below still shows.
+fn status_height(app: &FlightsApp, column: Rect, least: u16) -> Constraint {
+    let lines = wrapped_line_count(&app.message.0, column.width.saturating_sub(2));
+    Constraint::Length((lines + 2).clamp(least, (column.height / 2).max(least)))
 }
 
 fn draw_status(f: &mut Frame, app: &FlightsApp, area: Rect) {
@@ -1716,6 +1766,7 @@ fn draw_help(f: &mut Frame, game: &FlightsGame) {
                         ("↑↓", "choose"),
                         ("→ Enter", "fly"),
                         ("← Bksp", "back"),
+                        ("PgUp PgDn", "route"),
                     ]),
                     HelpLine::Keys(vec![
                         ("^N", "new"),
@@ -1961,6 +2012,88 @@ mod tests {
         let screen = render(&mut app, 120, 34);
         show(&screen);
         assert!(screen.contains(" nm"), "distances aren't revealed");
+    }
+
+    #[test]
+    fn route_box_scrolls() {
+        let mut app = app(Difficulty::Medium);
+        // A route longer than the box: keep flying while there's somewhere to go.
+        for _ in 0..12 {
+            if app.game.status() != Status::Playing || app.game.options().is_empty() {
+                break;
+            }
+            app.submit();
+        }
+        let start = format!("{}  start", app.game.network().code(app.game.route()[0]));
+        let screen = render(&mut app, 120, 24);
+        let (area, scroll, max) = app.route_frame.get();
+        assert!(max > 0, "the route fits, so this tests nothing:\n{screen}");
+        // It opens on the end of the route, with the start scrolled out of view.
+        assert_eq!(scroll, max);
+        assert!(!screen.contains(&start));
+        // The wheel over the box scrolls it, as far as its top and no further.
+        for _ in 0..max + 5 {
+            app.scroll_route(-1);
+        }
+        let screen = render(&mut app, 120, 24);
+        show(&screen);
+        assert_eq!(app.route_frame.get().1, 0);
+        assert!(
+            screen.contains(&start),
+            "the start isn't in view:\n{screen}"
+        );
+        assert!(app.on_route(area.x + 1, area.y + 1));
+        // Page Down goes back down; going back shows the new end.
+        app.scroll_route(app.route_page());
+        render(&mut app, 120, 24);
+        assert!(app.route_frame.get().1 > 0);
+        app.go_back();
+        render(&mut app, 120, 24);
+        let (_, scroll, max) = app.route_frame.get();
+        assert_eq!(scroll, max);
+    }
+
+    #[test]
+    fn give_up_routes_scroll_to_the_shortest_end() {
+        let mut app = app(Difficulty::Medium);
+        app.submit();
+        app.trigger_give_up();
+        render(&mut app, 120, 24);
+        let (_, scroll, max) = app.route_frame.get();
+        // Both routes from the top, and the rest a scroll away.
+        assert_eq!(scroll, 0);
+        assert!(max > 0);
+        app.scroll_route(i32::from(max));
+        let screen = render(&mut app, 120, 24);
+        show(&screen);
+        let end = app.game.end_code();
+        assert!(
+            screen.matches(end).count() >= 2,
+            "the shortest route's end isn't in view:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn give_up_status_shows_whole() {
+        // Every layout: map beside, no map, and one narrow column.
+        for (difficulty, width, height) in [
+            (Difficulty::Medium, 120, 34),
+            (Difficulty::Hard, 120, 34),
+            (Difficulty::Medium, 44, 50),
+            (Difficulty::Hard, 44, 50),
+        ] {
+            let mut app = app(difficulty);
+            app.submit();
+            app.trigger_give_up();
+            let screen = render(&mut app, width, height);
+            show(&screen);
+            // The status's last line, which starts at its box's edge (unlike
+            // the footer button, the options' note and the route's title).
+            assert!(
+                screen.contains("│[^N] New Game"),
+                "status cut off at {width}x{height} on {difficulty:?}:\n{screen}"
+            );
+        }
     }
 
     #[test]
