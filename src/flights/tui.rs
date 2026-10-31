@@ -43,43 +43,60 @@ const PLACE_WIDTH: usize = 20;
 /// Narrowest the side column gets, so the status line has room to read.
 const MIN_SIDE_WIDTH: u16 = 34;
 
-/// An airport's place cut to [`PLACE_WIDTH`].
+/// An airport's place cut to [`PLACE_WIDTH`], for the options list's column.
 fn short_place(text: &str) -> String {
-    if text.chars().count() > PLACE_WIDTH {
-        let cut: String = text.chars().take(PLACE_WIDTH - 1).collect();
+    fit_place(text, PLACE_WIDTH)
+}
+
+/// A place cut to `width` characters, ending in "…" when it's cut.
+fn fit_place(text: &str, width: usize) -> String {
+    if text.chars().count() > width {
+        let cut: String = text.chars().take(width.saturating_sub(1)).collect();
         format!("{}…", cut.trim_end())
     } else {
         text.to_string()
     }
 }
 
-/// Width of the column beside the map: enough for the widest option or route
-/// line the rules show (distance, connections, place), and no more, so the map
-/// gets the rest.
+/// Remarks under a stop in the route box after giving up: where the player's
+/// route left the shortest, where the shortest went instead, or (when the
+/// player hadn't yet strayed) its next hop. Kept short, since the column is
+/// sized to hold the longest beside a place.
+const YOU_LEFT: &str = "↑ you left here";
+const WENT_HERE: &str = "↑ went here";
+const NEXT_HOP: &str = "↑ next hop";
+/// Indent of a stop's second line, under its code.
+const INDENT: &str = "     ";
+
+/// Width of the column beside the map: the longest line it can ever show for
+/// these rules, worked out once so the column never changes width (not even
+/// when the game ends and every level reveals distances), and no more, so the
+/// map gets the rest. Route stops take two lines (see `route_lines`): the code,
+/// distance and connections, then a remark and the place.
 fn side_width(rules: Rules) -> u16 {
-    let distance = if rules.shows_distances() { 11 } else { 0 }; // "  9,999 nm"
-                                                                 // " via XXX" or " via XXX, YYY"
+    let count = |s: &str| s.chars().count();
+    // "  9,999 nm": in the options only where the level shows it, but in the
+    // route box always, as it's revealed once the game is over.
+    const DISTANCE: usize = 11;
+    // " via XXX" or " via XXX, YYY"
     let via = match (rules.shows_connections(), rules.connections()) {
         (false, _) | (true, 0) => 0,
         (true, 1) => 8,
         (true, _) => 13,
     };
-    let place = if rules.show_places {
-        PLACE_WIDTH + 2
-    } else {
-        0
-    };
-    // "> " + "LAS★" + columns, and " → LAS" + " · " before the place.
-    let option = 2 + 5 + distance + place + via;
-    let route = 6
-        + distance
-        + via
-        + if rules.show_places {
-            PLACE_WIDTH + 3
-        } else {
-            0
-        };
-    (option.max(route) as u16 + 2).max(MIN_SIDE_WIDTH)
+    let place = if rules.show_places { PLACE_WIDTH } else { 0 };
+    let option_distance = if rules.shows_distances() { DISTANCE } else { 0 };
+    // "> " + "LAS★" + columns.
+    let option = 2 + 5 + option_distance + via + if place > 0 { place + 2 } else { 0 };
+    // " → LAS" + distance + via, then the indent, remark and " · " place.
+    let first = 6 + DISTANCE + via;
+    let remark = [YOU_LEFT, WENT_HERE, NEXT_HOP]
+        .map(count)
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+    let second = count(INDENT) + remark + if place > 0 { 3 + place } else { 0 };
+    (option.max(first).max(second) as u16 + 2).max(MIN_SIDE_WIDTH)
 }
 
 /// Map padding around the airports shown, as a fraction of their spread.
@@ -839,12 +856,17 @@ fn bold(color: Color) -> Style {
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
-/// One line per airport of `route`: the start, then each hop with its distance,
-/// connections and place (as far as the game shows them). `note(i)` adds a
-/// remark to the `i`th stop; `style(airport)` colours its code.
+/// The lines for `route`, two to a stop: the code with its distance and
+/// connections (as far as the game shows them), then beneath it, indented, a
+/// remark (`note(i)` for the `i`th stop, an arrow pointing up at it) and the
+/// place. The same while playing and once the game is over, so the box looks the
+/// same and the column beside the map is sized for it (see [`side_width`]).
+/// With a line of its own, the place is cut only where it would pass the box's
+/// edge (`width`). `style(airport)` colours a code.
 fn route_lines(
     game: &FlightsGame,
     route: &[usize],
+    width: usize,
     style: &dyn Fn(usize) -> Style,
     note: &dyn Fn(usize) -> Option<Span<'static>>,
 ) -> Vec<Line<'static>> {
@@ -852,24 +874,32 @@ fn route_lines(
     let units = game.units();
     let gray = Style::default().fg(Color::Gray);
     let dark = Style::default().fg(Color::DarkGray);
-    let place = |i: usize| -> Span<'static> {
+    let mut lines = Vec::new();
+    let second = |lines: &mut Vec<Line<'static>>, i: usize, n: usize| {
+        let mut spans = vec![Span::raw(INDENT)];
+        let remark = note(n);
+        let had_remark = remark.is_some();
+        spans.extend(remark);
         let text = net.place(i);
         if game.rules().show_places && !text.is_empty() {
-            Span::styled(format!(" · {}", short_place(&text)), dark)
-        } else {
-            Span::raw("")
+            let sep = if had_remark { " · " } else { "· " };
+            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let room = width.saturating_sub(used + sep.chars().count());
+            spans.push(Span::styled(
+                format!("{sep}{}", fit_place(&text, room)),
+                dark,
+            ));
+        }
+        if spans.len() > 1 {
+            lines.push(Line::from(spans));
         }
     };
-    let mut lines = vec![Line::from(
-        [
-            Span::raw("   "),
-            Span::styled(net.code(route[0]).to_string(), style(route[0])),
-        ]
-        .into_iter()
-        .chain(note(0))
-        .chain([Span::styled("  start", gray), place(route[0])])
-        .collect::<Vec<_>>(),
-    )];
+    lines.push(Line::from(vec![
+        Span::raw("   "),
+        Span::styled(net.code(route[0]).to_string(), style(route[0])),
+        Span::styled("  start", gray),
+    ]));
+    second(&mut lines, route[0], 0);
     for (n, w) in route.windows(2).enumerate() {
         let hop = net.hop(w[0], w[1]).expect("route legs are hops");
         let changed = net
@@ -879,8 +909,6 @@ fn route_lines(
             .position(|(a, b)| a != b);
         let mut spans = vec![Span::styled(" → ", gray)];
         spans.extend(code_spans(net.code(w[1]), changed, style(w[1])));
-        // Right after the code, so a long line can't push it out of sight.
-        spans.extend(note(n + 1));
         if game.distances_visible() {
             spans.push(Span::styled(
                 format!("  {}", units.format(hop.distance)),
@@ -890,8 +918,8 @@ fn route_lines(
         if game.rules().shows_connections() {
             spans.push(Span::styled(via_suffix(net, &hop.via), dark));
         }
-        spans.push(place(w[1]));
         lines.push(Line::from(spans));
+        second(&mut lines, w[1], n + 1);
     }
     lines
 }
@@ -917,21 +945,28 @@ fn draw_route(f: &mut Frame, app: &FlightsApp, area: Rect) {
         }
     };
     let no_note = |_: usize| None;
-    let mut lines = route_lines(game, game.route(), &code_style, &no_note);
+    // Inside the box's borders.
+    let width = usize::from(area.width.saturating_sub(2));
+    let mut lines = route_lines(game, game.route(), width, &code_style, &no_note);
     let mut scroll_to_end = true;
     if game.status() == Status::GivenUp {
         // Both routes, and where the player's left the shortest one.
         let split = game.divergence();
         let yours_left = split < game.route().len();
         let left_note = |i: usize| {
-            (yours_left && i == split)
-                .then(|| Span::styled(" ← left the shortest route", bold(COLOR_WARNING)))
+            (yours_left && i == split).then(|| Span::styled(YOU_LEFT, bold(COLOR_WARNING)))
         };
         lines = vec![Line::from(Span::styled(
             format!("Yours{}", total(game.total_distance())),
             bold(COLOR_ACCENT),
         ))];
-        lines.extend(route_lines(game, game.route(), &code_style, &left_note));
+        lines.extend(route_lines(
+            game,
+            game.route(),
+            width,
+            &code_style,
+            &left_note,
+        ));
         lines.push(Line::from(Span::styled(
             format!("Shortest{}", total(game.best_distance())),
             bold(COLOR_POSITIVE),
@@ -948,15 +983,11 @@ fn draw_route(f: &mut Frame, app: &FlightsApp, area: Rect) {
         };
         let here_note = |i: usize| {
             (i == split).then(|| {
-                let text = if yours_left {
-                    " ← goes here instead"
-                } else {
-                    " ← your next hop"
-                };
+                let text = if yours_left { WENT_HERE } else { NEXT_HOP };
                 Span::styled(text, bold(COLOR_POSITIVE))
             })
         };
-        lines.extend(route_lines(game, best, &best_style, &here_note));
+        lines.extend(route_lines(game, best, width, &best_style, &here_note));
         scroll_to_end = false;
     } else if !game.at_destination() {
         let net = game.network();
@@ -965,15 +996,17 @@ fn draw_route(f: &mut Frame, app: &FlightsApp, area: Rect) {
             Span::styled(" … ", Style::default().fg(Color::Gray)),
             Span::styled(game.end_code(), bold(COLOR_DESTINATION)),
             Span::styled("  destination", Style::default().fg(Color::Gray)),
-            if game.rules().show_places && !text.is_empty() {
-                Span::styled(
-                    format!(" · {}", short_place(&text)),
-                    Style::default().fg(Color::DarkGray),
-                )
-            } else {
-                Span::raw("")
-            },
         ]));
+        if game.rules().show_places && !text.is_empty() {
+            let room = width.saturating_sub(INDENT.len() + 2);
+            lines.push(Line::from(vec![
+                Span::raw(INDENT),
+                Span::styled(
+                    format!("· {}", fit_place(&text, room)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
     }
     let title = match game.status() {
         Status::Playing => format!(" Route{} ", total(game.total_distance())),
@@ -1934,6 +1967,81 @@ mod tests {
     }
 
     #[test]
+    fn game_over_keeps_the_side_column_and_stacks_each_stop() {
+        for d in [Difficulty::Easy, Difficulty::Medium] {
+            let mut app = app(d);
+            let width_of_side = |app: &mut FlightsApp| {
+                let buf = buffer(app, 120, 34);
+                // The side column's left border: the last "┌" on the row under the header.
+                (0..120u16)
+                    .rev()
+                    .find(|&x| buf[(x, 3)].symbol() == "┌")
+                    .unwrap()
+            };
+            let playing = width_of_side(&mut app);
+            app.submit();
+            app.trigger_give_up();
+            assert_eq!(
+                width_of_side(&mut app),
+                playing,
+                "{d}: the side column moved"
+            );
+            let screen = render(&mut app, 120, 34);
+            show(&screen);
+            // Each stop's place sits on the line under its code, indented.
+            let net = app.game.network();
+            let stop = app.game.best_route()[1];
+            // The start of it: a long one is cut at the box's edge.
+            let place: String = net.place(stop).chars().take(16).collect();
+            let lines: Vec<&str> = screen.lines().collect();
+            // Below the route box's title: the status above says the route in words.
+            let title = lines.iter().position(|l| l.contains("Game over")).unwrap();
+            let row = title
+                + lines[title..]
+                    .iter()
+                    .position(|l| l.contains(&format!("→ {}", net.code(stop))))
+                    .expect("the shortest route's first stop is listed");
+            assert!(
+                lines[row + 1..=row + 2]
+                    .iter()
+                    .any(|l| l.contains(&format!("· {place}"))),
+                "{d}: '{place}' isn't under its stop"
+            );
+        }
+    }
+
+    #[test]
+    fn route_places_use_their_whole_line() {
+        // A start whose place is longer than the options' 20-character column,
+        // but short enough for a line of its own.
+        let net = Rules::default().network();
+        let start = (0..net.len())
+            .find(|&i| !net.hops(i).is_empty() && (24..=30).contains(&net.place(i).chars().count()))
+            .unwrap();
+        let end = net.hops(start)[0].to;
+        let game = FlightsGame::with_puzzle(
+            net,
+            start,
+            end,
+            Difficulty::Medium,
+            Rules::default(),
+            Units::Nm,
+            None,
+        )
+        .unwrap();
+        let mut app = FlightsApp::new(game);
+        let screen = render(&mut app, 120, 34);
+        show(&screen);
+        let place = net.place(start);
+        assert!(screen.contains(&format!("· {place}")), "'{place}' was cut");
+        // In the options it's still cut to its column.
+        assert!(fit_place(&place, PLACE_WIDTH).ends_with('…'));
+        // And where the box is too narrow, it's cut at the edge.
+        let long = "Saint-Jacques-de-la-Lande, Ille-et-Vilaine, FR";
+        assert_eq!(fit_place(long, 10), "Saint-Jac…");
+    }
+
+    #[test]
     fn map_labels_never_overlap() {
         let mut labels = MapLabels::new((0.0, 10.0, 0.0, 10.0), 20, 10);
         let style = Style::default();
@@ -2043,12 +2151,7 @@ mod tests {
         show(&render(&mut app, 120, 34));
         // The route box lists both, and where they part.
         let screen: String = buf.content().iter().map(|c| c.symbol()).collect();
-        for text in [
-            "Yours",
-            "Shortest",
-            "BAA ← left the shortest route",
-            "ABA ← goes here instead",
-        ] {
+        for text in ["Yours", "Shortest", "↑ you left here", "↑ went here"] {
             assert!(screen.contains(text), "no '{text}'");
         }
         assert!(app
