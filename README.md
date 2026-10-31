@@ -52,7 +52,7 @@ Flights asks you to get from one airport to another by the shortest distance:
 - **Offline Word Meanings (Contexto)**:
   - `data/contexto.bin` (~18 MB, embedded in the `contexto` binary) holds its word list and a 300-dimension [GloVe](https://nlp.stanford.edu/projects/glove/) vector per word, so ranking needs no network. It's committed rather than built, since GloVe is an 822 MB download; see [Updating the Contexto data](#updating-the-contexto-data).
 - **Offline Airports & Routes (Flights)**:
-  - `data/flights.tsv` (~550 KB, embedded in the `flights` binary) holds every airport and hop the game uses, scraped from Wikipedia's airport articles; see [Updating the Flights data](#updating-the-flights-data).
+  - `data/flights.tsv` (~550 KB, embedded in the `flights` binary) holds every airport and hop the game uses, scraped from Wikipedia's airport articles, and `data/coastlines.bin` (~1.9 MB) holds [Natural Earth](https://www.naturalearthdata.com/)'s coastlines at three scales, so the map stays sharp as you zoom in; see [Updating the Flights data](#updating-the-flights-data).
 - **Saved Games**: Quit mid-game and the next launch picks up where you left off (see [Saved games](#saved-games)).
 - **Minimal Dependencies**:
   - Only 6 direct dependencies (`ratatui`, `crossterm`, `clap`, `fastrand`, and `serde` / `serde_json` for saved games).
@@ -228,6 +228,14 @@ python3 scripts/build-flights-data.py --cache-dir ~/.cache/flights-wiki --log fl
 
 Routes are the scheduled passenger flights, year-round or seasonal, in each article's "Airlines and destinations" section (not cargo; charter only with `--include-charter`), counted when either airport's article lists them. Airport codes and coordinates come from OurAirports, whose `wikipedia_link` column ties each article to its code. Direct flights between codes one letter apart are rare (about 340 of some 34,000 routes, in clusters too small for puzzles), so a hop is the shortest itinerary with connections. The file holds each pair's best itinerary with at most 0, 1 and 2 connections (the best one-stop ticket isn't always the two-stop one less a stop), along with each airport's city and country. For each limit, the script logs the hops and the network's largest components, and counts the puzzles by the number of hops in their shortest route (writing the counts into the file, for the in-game help and the settings page).
 
+The map's coastlines come from `scripts/build-coastline-data.py`, which downloads Natural Earth's 1:110m, 1:50m and 1:10m coastlines (or pass `--geojson-dir` for ones already downloaded) and packs them into `data/coastlines.bin`:
+
+```bash
+python3 scripts/build-coastline-data.py
+```
+
+The map draws them as lines rather than dots, at the scale its zoom can show: 1:110m (5,128 points) for the world, 1:50m (60,416) for a region, 1:10m (410,582) close in.
+
 ## Credits & License
 
 - Written by [Gus Lipkin](https://guslipkin.me).
@@ -235,6 +243,6 @@ Routes are the scheduled passenger flights, year-round or seasonal, in each arti
 - `contexto` is an unofficial version of [Contexto](https://contexto.me/); play the original at <https://contexto.me/>.
 - Word list from [SCOWL (Spell Checker Oriented Word Lists)](http://wordlist.aspell.net/) by Kevin Atkinson (see [`LICENSE.SCOWL`](LICENSE.SCOWL)).
 - Contexto's word meanings (and, from GloVe 840B's cased vocabulary, which words are names) from [GloVe](https://nlp.stanford.edu/projects/glove/) by Jeffrey Pennington, Richard Socher and Christopher D. Manning, made available under the [Open Data Commons Public Domain Dedication and License](https://opendatacommons.org/licenses/pddl/1-0/).
-- Flights' routes from the "Airlines and destinations" sections of [English Wikipedia](https://en.wikipedia.org/)'s airport articles, by Wikipedia's contributors, under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/); `data/flights.tsv` is a derivative of them under the same license. Airport codes and coordinates from [OurAirports](https://ourairports.com/data/) (public domain).
+- Flights' routes from the "Airlines and destinations" sections of [English Wikipedia](https://en.wikipedia.org/)'s airport articles, by Wikipedia's contributors, under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/); `data/flights.tsv` is a derivative of them under the same license. Airport codes and coordinates from [OurAirports](https://ourairports.com/data/) (public domain). Map coastlines from [Natural Earth](https://www.naturalearthdata.com/) (public domain).
 - Contexto's difficulty levels from [WordNet 3.0](https://wordnet.princeton.edu/) (Princeton University, "WordNet 3.0", 2006) noun categories; only the derived level, not WordNet itself, is in the binary.
 

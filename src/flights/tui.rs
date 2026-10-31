@@ -8,13 +8,14 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Map, MapResolution, Points};
+use ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Points};
 use ratatui::widgets::{
     Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Widget, Wrap,
 };
 use ratatui::{Frame, Terminal};
 
 use crate::contexto::game::grouped;
+use crate::flights::coast::{self, clip, Bounds, Coast};
 use crate::flights::data::MAX_CONNECTIONS;
 use crate::flights::game::{
     code_str, parse_code, Code, Difficulty, FlightOption, FlightsGame, FlyOutcome, Rules, Status,
@@ -156,9 +157,6 @@ struct FlightsApp {
     /// Where a drag on the map began, and the view then.
     drag: Option<(u16, u16, Bounds)>,
 }
-
-/// A map view: `(lon_min, lon_max, lat_min, lat_max)`.
-type Bounds = (f64, f64, f64, f64);
 
 /// How much one zoom key press narrows the view.
 const ZOOM_STEP: f64 = 1.5;
@@ -1426,41 +1424,6 @@ impl MapLabels {
     }
 }
 
-/// The part of the line from `a` to `b` inside `bounds` (Liang-Barsky), since
-/// the canvas drops a line with either end outside its bounds, which a zoomed
-/// view would otherwise do to every hop running off its edge.
-fn clip(
-    a: (f64, f64),
-    b: (f64, f64),
-    (x0, x1, y0, y1): Bounds,
-) -> Option<((f64, f64), (f64, f64))> {
-    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-    let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
-    for (p, q) in [
-        (-dx, a.0 - x0),
-        (dx, x1 - a.0),
-        (-dy, a.1 - y0),
-        (dy, y1 - a.1),
-    ] {
-        if p == 0.0 {
-            if q < 0.0 {
-                return None;
-            }
-        } else {
-            let t = q / p;
-            if p < 0.0 {
-                t0 = t0.max(t);
-            } else {
-                t1 = t1.min(t);
-            }
-        }
-    }
-    (t0 <= t1).then_some((
-        (a.0 + t0 * dx, a.1 + t0 * dy),
-        (a.0 + t1 * dx, a.1 + t1 * dy),
-    ))
-}
-
 /// A canvas of just `paths` (each hop as the airports it flies through), with
 /// nothing else drawn, to lay over the map.
 fn path_canvas<'a>(
@@ -1620,9 +1583,11 @@ fn draw_map(f: &mut Frame, app: &FlightsApp, area: Rect) {
         .x_bounds([x0, x1])
         .y_bounds([y0, y1])
         .paint(|ctx| {
-            ctx.draw(&Map {
+            // Natural Earth's coastlines, as detailed as the view's dots can show.
+            ctx.draw(&Coast {
+                lines: coast::for_view(bounds.3 - bounds.2, inner.height),
+                bounds,
                 color: Color::DarkGray,
-                resolution: MapResolution::High,
             });
             ctx.layer();
             let mut segments = |paths: &[Vec<usize>], color: Color| {
@@ -1776,6 +1741,7 @@ fn draw_help(f: &mut Frame, game: &FlightsGame) {
                         "Data",
                         "Routes: Wikipedia (CC BY-SA). Airports: OurAirports.".to_string(),
                     ),
+                    HelpLine::Credit("Map", "Coastlines: Natural Earth".to_string()),
                 ],
             },
         ],
@@ -2285,6 +2251,26 @@ mod tests {
     }
 
     #[test]
+    fn close_zoom_draws_detailed_coast_quickly() {
+        // Zoomed far in on a coast (around Oslo), the finest coastlines are drawn,
+        // fast enough to redraw on every key.
+        let mut app = app(Difficulty::Medium);
+        render(&mut app, 120, 34);
+        app.view = Some((9.5, 12.5, 58.8, 60.2));
+        let started = std::time::Instant::now();
+        let buf = buffer(&mut app, 120, 34);
+        let elapsed = started.elapsed();
+        let coast = buf
+            .content()
+            .iter()
+            .filter(|c| c.fg == Color::DarkGray && braille(c))
+            .count();
+        assert!(coast > 50, "only {coast} cells of coastline");
+        assert!(elapsed.as_millis() < 500, "a frame took {elapsed:?}");
+        show(&render(&mut app, 120, 34));
+    }
+
+    #[test]
     fn zoom_has_limits() {
         let mut app = app(Difficulty::Medium);
         render(&mut app, 120, 34);
@@ -2299,23 +2285,6 @@ mod tests {
         let (_, (_, _, y0, y1)) = app.current_view().unwrap();
         let (_, fitted) = app.map_frame.get().unwrap();
         assert!(y1 - y0 <= MAX_VIEW_LAT.max(fitted.3 - fitted.2) + 1e-9);
-    }
-
-    #[test]
-    fn lines_are_clipped_to_the_view() {
-        let b = (0.0, 10.0, 0.0, 10.0);
-        // Inside: unchanged.
-        assert_eq!(
-            clip((1.0, 1.0), (9.0, 9.0), b),
-            Some(((1.0, 1.0), (9.0, 9.0)))
-        );
-        // Crossing the edge: cut at it.
-        let ((ax, ay), (bx, by)) = clip((-10.0, 5.0), (5.0, 5.0), b).unwrap();
-        assert_eq!((ax, ay, bx, by), (0.0, 5.0, 5.0, 5.0));
-        // Through the view with both ends outside.
-        assert!(clip((-5.0, 5.0), (15.0, 5.0), b).is_some());
-        // Wholly outside.
-        assert_eq!(clip((-5.0, -5.0), (-1.0, 20.0), b), None);
     }
 
     #[test]

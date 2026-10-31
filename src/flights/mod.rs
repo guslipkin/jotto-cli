@@ -8,6 +8,7 @@ use std::process;
 
 use clap::Parser;
 
+pub mod coast;
 pub mod data;
 pub mod game;
 pub mod plain;

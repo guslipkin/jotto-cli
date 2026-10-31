@@ -465,5 +465,6 @@ fn print_credits() {
     println!("FLIGHTS CLI was written by Gus Lipkin (https://guslipkin.me).");
     println!("Routes come from English Wikipedia's airport articles (CC BY-SA 4.0).");
     println!("Airports and coordinates come from OurAirports (https://ourairports.com/data/), public domain.");
+    println!("Map coastlines come from Natural Earth (https://www.naturalearthdata.com/), public domain.");
     println!();
 }
