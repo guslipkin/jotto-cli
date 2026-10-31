@@ -114,8 +114,8 @@ wordle
 contexto
 flights
 
-# Or pick any of them from a menu: leaving a game comes back to it, and quitting
-# it returns to your shell. Games resume and save just as their own commands do.
+# Or pick any of them from a menu (keys or mouse): leaving a game comes back to
+# it, and quitting it returns to your shell. Games resume and save just as their own commands do.
 arcade
 arcade --session-saves   # saves kept for this run only, then removed (as the Docker image does)
 

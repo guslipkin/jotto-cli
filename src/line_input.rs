@@ -9,7 +9,7 @@
 use std::io::{self, IsTerminal, Write};
 
 use crossterm::cursor::MoveToColumn;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{self, Clear, ClearType};
 use crossterm::{execute, queue};
 
@@ -76,7 +76,7 @@ impl LineReader {
         let mut editor = Editor::default();
         redraw(&mut out, prompt, &editor)?;
         loop {
-            let Event::Key(key) = event::read()? else {
+            let Event::Key(key) = crate::input::read()? else {
                 continue;
             };
             if key.kind == KeyEventKind::Release {

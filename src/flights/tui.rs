@@ -1,9 +1,7 @@
 use std::cell::Cell as StdCell;
 use std::io;
 
-use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
-};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -752,7 +750,7 @@ fn run_event_loop(
             return Ok(());
         }
 
-        match event::read()? {
+        match crate::input::read()? {
             Event::Mouse(mouse) => {
                 let (col, row) = (mouse.column, mouse.row);
                 let free = !app.show_help && app.settings.is_none();

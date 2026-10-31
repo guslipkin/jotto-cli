@@ -3,7 +3,7 @@ use std::panic;
 
 use crossterm::cursor::Show;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseButton, MouseEventKind,
 };
 use crossterm::execute;
@@ -684,7 +684,7 @@ fn run_event_loop(
             return Ok(());
         }
 
-        match event::read()? {
+        match crate::input::read()? {
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     app.handle_mouse_click(mouse.column, mouse.row);

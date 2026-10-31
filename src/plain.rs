@@ -249,35 +249,65 @@ fn format_wordle_letter(ch: char, state: LetterState, use_color: bool, padded: b
     }
 }
 
+/// Every letter of the scratch pad, A to Z, each three cells wide: scratched out
+/// and positive ones styled, the rest plain, so the whole alphabet is shown and
+/// the unmarked letters can be read off at a glance (issue #2).
 fn format_scratch_tokens(game: &GameState, use_color: bool) -> Vec<String> {
     game.scratched_letters()
         .iter()
         .enumerate()
-        .filter_map(|(i, &state)| {
+        .map(|(i, &state)| {
             let ch = (b'A' + i as u8) as char;
             match (state, use_color) {
-                (ScratchState::Default, _) => None,
-                (ScratchState::ScratchedOut, true) => Some(format!(
+                (ScratchState::Default, _) => format!(" {ch} "),
+                (ScratchState::ScratchedOut, true) => format!(
                     "\x1b[1;9;30;48;2;{}m {ch} \x1b[0m",
                     ansi_rgb(COLOR_NEGATIVE)
-                )),
-                (ScratchState::ScratchedOut, false) => Some(format!("~{ch}~")),
-                (ScratchState::Positive, true) => Some(format!(
-                    "\x1b[1;30;48;2;{}m {ch} \x1b[0m",
-                    ansi_rgb(COLOR_POSITIVE)
-                )),
-                (ScratchState::Positive, false) => Some(format!("+{ch}+")),
+                ),
+                (ScratchState::ScratchedOut, false) => format!("~{ch}~"),
+                (ScratchState::Positive, true) => {
+                    format!("\x1b[1;30;48;2;{}m {ch} \x1b[0m", ansi_rgb(COLOR_POSITIVE))
+                }
+                (ScratchState::Positive, false) => format!("+{ch}+"),
             }
         })
         .collect()
 }
 
+/// Cells a scratch letter takes, and the space between letters.
+const SCRATCH_CELL: usize = 3;
+const SCRATCH_GAP: usize = 1;
+
+/// The scratch pad as lines for a terminal `width` cells wide, starting with
+/// `label` and indenting the rest under it. The letters are split into even rows
+/// that fit, rather than one long line the terminal wraps wherever it ends,
+/// mid-letter, with the styled letters' colours spilling over (issue #3).
+fn scratch_lines(tokens: &[String], label: &str, width: usize) -> Vec<String> {
+    let room = width.saturating_sub(label.chars().count());
+    let fit = ((room + SCRATCH_GAP) / (SCRATCH_CELL + SCRATCH_GAP)).max(1);
+    // As few rows as fit, as evenly filled as they can be (A-M and N-Z at 80).
+    let rows = tokens.len().div_ceil(fit).max(1);
+    let per_row = tokens.len().div_ceil(rows).max(1);
+    let indent = " ".repeat(label.chars().count());
+    tokens
+        .chunks(per_row)
+        .enumerate()
+        .map(|(i, row)| {
+            let lead = if i == 0 { label } else { indent.as_str() };
+            format!("{lead}{}", row.join(" "))
+        })
+        .collect()
+}
+
+/// The terminal's width, or 80 when it can't be told (piped output, say).
+fn terminal_width() -> usize {
+    crossterm::terminal::size().map_or(80, |(w, _)| usize::from(w).max(1))
+}
+
 fn print_scratch(game: &GameState, use_color: bool) {
     let tokens = format_scratch_tokens(game, use_color);
-    if tokens.is_empty() {
-        println!("Scratch: (none)");
-    } else {
-        println!("Scratch: {}", tokens.join(" "));
+    for line in scratch_lines(&tokens, "Scratch: ", terminal_width()) {
+        println!("{line}");
     }
 }
 
@@ -318,8 +348,8 @@ fn print_board(game: &GameState, use_color: bool) {
             }
 
             let scratch = format_scratch_tokens(game, use_color);
-            if !scratch.is_empty() {
-                println!("Scratch:      {}", scratch.join(" "));
+            for line in scratch_lines(&scratch, "Scratch:      ", terminal_width()) {
+                println!("{line}");
             }
         }
         GameMode::Wordle => {
@@ -428,4 +458,59 @@ fn print_credits(mode: GameMode) {
         );
     }
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain_tokens() -> Vec<String> {
+        (b'A'..=b'Z').map(|c| format!(" {} ", c as char)).collect()
+    }
+
+    #[test]
+    fn scratch_shows_every_letter() {
+        let mut game = GameState::new_with_mode(GameMode::Jotto, Difficulty::Easy, None).unwrap();
+        game.toggle_scratch('e');
+        game.toggle_scratch('q');
+        game.toggle_scratch('q');
+        let tokens = format_scratch_tokens(&game, false);
+        assert_eq!(tokens.len(), 26);
+        assert_eq!(tokens[0], " A ");
+        assert_eq!(tokens[4], "~E~");
+        assert_eq!(tokens[16], "+Q+");
+    }
+
+    #[test]
+    fn scratch_rows_fit_the_terminal() {
+        let tokens = plain_tokens();
+        for width in [40, 60, 80, 120, 200] {
+            let lines = scratch_lines(&tokens, "Scratch: ", width);
+            for line in &lines {
+                assert!(
+                    line.chars().count() <= width,
+                    "{width}: '{line}' is too wide"
+                );
+            }
+            // Every letter, once, in order.
+            let letters: String = lines
+                .iter()
+                .flat_map(|l| l.chars().filter(char::is_ascii_uppercase))
+                .collect::<String>()
+                .replace("S", "")
+                .chars()
+                .collect();
+            assert!(
+                letters.ends_with("ABCDEFGHIJKLMNOPQRTUVWXYZ"),
+                "{width}: {letters}"
+            );
+        }
+        // At 80 columns: A-M, then N-Z under it.
+        let lines = scratch_lines(&tokens, "Scratch: ", 80);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].trim_end().ends_with('M'));
+        assert!(lines[1].starts_with("          N "), "{:?}", lines[1]);
+        // Wide enough, one line.
+        assert_eq!(scratch_lines(&tokens, "Scratch: ", 120).len(), 1);
+    }
 }

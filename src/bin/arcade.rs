@@ -18,7 +18,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -74,7 +77,7 @@ const GAMES: [(Play, &str, &str); 4] = [
 ];
 
 /// The keys, along the menu's bottom border.
-const FOOTER: &str = " [↑↓] choose  [Enter] play  [1-4] play  [q] quit ";
+const FOOTER: &str = " [↑↓] choose  [Enter] or click: play  [1-4] play  [q] quit ";
 
 /// The menu's rows: the games, then Quit.
 const ROWS: usize = GAMES.len() + 1;
@@ -107,7 +110,7 @@ struct Screen(Terminal<CrosstermBackend<Stdout>>);
 impl Screen {
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
-        execute!(stdout(), EnterAlternateScreen)?;
+        execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
         Ok(Self(Terminal::new(CrosstermBackend::new(stdout()))?))
     }
 }
@@ -115,7 +118,7 @@ impl Screen {
 impl Drop for Screen {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen);
+        let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
     }
 }
 
@@ -157,10 +160,29 @@ fn pick(
     selected: &mut usize,
     note: Option<String>,
 ) -> io::Result<Option<usize>> {
+    // Where each row was drawn, for the mouse.
+    let mut items = [Rect::default(); ROWS];
     loop {
-        terminal.draw(|f| draw(f, *selected, note.as_deref()))?;
-        let Event::Key(key) = event::read()? else {
-            continue;
+        terminal.draw(|f| items = draw(f, *selected, note.as_deref()))?;
+        let key = match jotto::input::read()? {
+            Event::Key(key) => key,
+            // Hovering a row chooses it, clicking it plays it (or quits), and the
+            // wheel moves the choice.
+            Event::Mouse(mouse) => {
+                let over = row_at(&items, mouse.column, mouse.row);
+                match (mouse.kind, over) {
+                    (MouseEventKind::Moved, Some(i)) => *selected = i,
+                    (MouseEventKind::Down(MouseButton::Left), Some(i)) => {
+                        *selected = i;
+                        return Ok((i < GAMES.len()).then_some(i));
+                    }
+                    (MouseEventKind::ScrollUp, _) => *selected = (*selected + ROWS - 1) % ROWS,
+                    (MouseEventKind::ScrollDown, _) => *selected = (*selected + 1) % ROWS,
+                    _ => {}
+                }
+                continue;
+            }
+            _ => continue,
         };
         if key.kind != KeyEventKind::Press {
             continue;
@@ -182,7 +204,15 @@ fn pick(
     }
 }
 
-fn draw(f: &mut Frame, selected: usize, note: Option<&str>) {
+/// The row (a game, or Quit) at terminal cell (`col`, `row`), if any.
+fn row_at(items: &[Rect], col: u16, row: u16) -> Option<usize> {
+    items
+        .iter()
+        .position(|r| r.width > 0 && row == r.y && col >= r.x && col < r.x + r.width)
+}
+
+/// Draws the menu, returning where each row went, so the mouse can find them.
+fn draw(f: &mut Frame, selected: usize, note: Option<&str>) -> [Rect; ROWS] {
     // As wide as the longest line (" > " + " 1  Contexto   " + "  " + what it
     // is), plus borders and a margin, so nothing is cut; no wider than the terminal.
     let longest = GAMES
@@ -257,6 +287,21 @@ fn draw(f: &mut Frame, selected: usize, note: Option<&str>) {
         lines.push(Line::from(""));
     }
     f.render_widget(Paragraph::new(lines), rows[1]);
+    // Each row is a line, after a blank one, with a blank between rows; a row
+    // that didn't fit the terminal has no area.
+    let list = rows[1];
+    let items = std::array::from_fn(|i| {
+        let y = list.y + 1 + 2 * i as u16;
+        if y < list.y + list.height {
+            Rect {
+                y,
+                height: 1,
+                ..list
+            }
+        } else {
+            Rect::default()
+        }
+    });
     if let Some(note) = note {
         f.render_widget(
             Paragraph::new(Span::styled(
@@ -266,6 +311,7 @@ fn draw(f: &mut Frame, selected: usize, note: Option<&str>) {
             rows[2],
         );
     }
+    items
 }
 
 #[cfg(test)]
@@ -277,7 +323,9 @@ mod tests {
     fn menu_lists_every_game_and_quit() {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
-            .draw(|f| draw(f, 2, Some("Contexto stopped")))
+            .draw(|f| {
+                draw(f, 2, Some("Contexto stopped"));
+            })
             .unwrap();
         let screen: String = terminal
             .backend()
@@ -299,6 +347,27 @@ mod tests {
         let at = |name: &str| screen.find(name).unwrap();
         assert!(at("Contexto") < at("Flights"));
         assert!(at("Flights") < at("Jotto") && at("Jotto") < at("Wordle"));
+    }
+
+    #[test]
+    fn rows_are_found_where_they_are_drawn() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut items = [Rect::default(); ROWS];
+        terminal.draw(|f| items = draw(f, 0, None)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let line = |y: u16| (0..80u16).map(|x| buf[(x, y)].symbol()).collect::<String>();
+        for (i, &(_, name, _)) in GAMES.iter().enumerate() {
+            assert!(line(items[i].y).contains(name), "row {i} isn't {name}");
+            let (x, y) = (items[i].x + 5, items[i].y);
+            assert_eq!(row_at(&items, x, y), Some(i));
+        }
+        assert!(line(items[GAMES.len()].y).contains("Quit"));
+        assert_eq!(
+            row_at(&items, items[0].x, items[0].y + 1),
+            None,
+            "the gap between rows"
+        );
+        assert_eq!(row_at(&items, 0, 0), None);
     }
 
     #[test]

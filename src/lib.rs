@@ -7,6 +7,7 @@ pub mod dict;
 pub mod flights;
 pub mod game;
 mod help;
+pub mod input;
 pub mod line_input;
 pub mod plain;
 pub mod save;
