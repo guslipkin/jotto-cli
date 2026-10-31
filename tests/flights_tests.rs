@@ -288,6 +288,7 @@ fn difficulty_levels() {
         fixed_route: false,
         start: None,
         end: None,
+        reuse_connections: true,
     };
     assert_eq!(Difficulty::Custom.rules(mine), mine);
 }
@@ -302,6 +303,7 @@ fn saved_rules_round_trip_and_reject_nonsense() {
         fixed_route: false,
         start: None,
         end: None,
+        reuse_connections: false,
     };
     assert_eq!(SavedRules::from(mine).rules(), Some(mine));
     for broken in [
@@ -418,6 +420,7 @@ fn custom_games_play_by_their_rules() {
         fixed_route: false,
         start: None,
         end: None,
+        reuse_connections: true,
     };
     let mut g = FlightsGame::random(Difficulty::Custom, mine, Units::Nm, None).unwrap();
     assert_eq!(g.rules(), mine);
@@ -554,6 +557,7 @@ fn custom_start_and_end_are_checked() {
         fixed_route: true,
         start: start.map(|c| *<&[u8; 3]>::try_from(c.as_bytes()).unwrap()),
         end: end.map(|c| *<&[u8; 3]>::try_from(c.as_bytes()).unwrap()),
+        reuse_connections: true,
     };
     // A start alone deals a random puzzle from it, as an end alone does to it.
     let from = with(Some("LAX"), None, Some(6));
@@ -610,4 +614,175 @@ fn custom_start_and_end_are_checked() {
         .rules(),
         None
     );
+}
+
+/// For games that use each airport once. The short way, AAA → ABA → ABB → BBB,
+/// connects at ZZZ twice, so then only the long way through BAA and BBA is left.
+/// ABA's hops have spare tickets (via YYY, and via AAA), and AAA → ACA connects
+/// at ABB, a stop on the short way.
+const ONCE_FIXTURE: &str = "\
+# fixture
+A\tAAA\t0\t0
+A\tABA\t0\t1
+A\tABB\t0\t2
+A\tACA\t0.5\t1
+A\tBAA\t1\t0
+A\tBBA\t1\t1.5
+A\tBBB\t0\t3
+A\tYYY\t0.6\t0.5
+A\tZZZ\t0.1\t0.5
+H\tAAA\tABA\tx\tZZZ\tZZZ\tYYY
+H\tAAA\tACA\tx\tABB\tABB\tx
+H\tAAA\tBAA\t-\t-\t-
+H\tABA\tABB\tx\tZZZ\tZZZ\tAAA
+H\tABA\tACA\tx\tZZZ\tZZZ\tYYY
+H\tABB\tBBB\t-\t-\t-
+H\tBAA\tBBA\t-\t-\t-
+H\tBBA\tBBB\t-\t-\t-
+";
+
+fn once_rules(reuse_connections: bool) -> Rules {
+    Rules {
+        reuse_connections,
+        ..Rules::default()
+    }
+}
+
+fn once_game(reuse_connections: bool) -> FlightsGame {
+    let net: &'static Network = Box::leak(Box::new(Network::parse(ONCE_FIXTURE, 1).unwrap()));
+    FlightsGame::with_puzzle(
+        net,
+        idx(net, "AAA"),
+        idx(net, "BBB"),
+        Difficulty::Custom,
+        once_rules(reuse_connections),
+        Units::Nm,
+        None,
+    )
+    .unwrap()
+}
+
+fn via(g: &FlightsGame, leg: usize) -> Vec<&str> {
+    let net = g.network();
+    g.legs()[leg].via.iter().map(|&i| net.code(i)).collect()
+}
+
+#[test]
+fn spare_tickets_are_read_within_the_limit() {
+    let net = Network::parse(ONCE_FIXTURE, 1).unwrap();
+    let hop = net.hop(idx(&net, "ABA"), idx(&net, "ACA")).unwrap();
+    assert_eq!(hop.via, [idx(&net, "ZZZ")]);
+    assert_eq!(hop.spare.len(), 1);
+    assert_eq!(hop.spare[0].via, [idx(&net, "YYY")]);
+    assert!(hop.spare[0].distance > hop.distance);
+    // Backwards, the same tickets (one connection reads the same either way).
+    let back = net.hop(idx(&net, "ACA"), idx(&net, "ABA")).unwrap();
+    assert_eq!(back.spare, hop.spare);
+    // With no connections allowed, there's no ticket to spare.
+    let direct = Network::parse(ONCE_FIXTURE, 0).unwrap();
+    assert!(direct
+        .hop(idx(&direct, "ABA"), idx(&direct, "ACA"))
+        .is_none());
+    assert!(direct
+        .hop(idx(&direct, "AAA"), idx(&direct, "BAA"))
+        .unwrap()
+        .spare
+        .is_empty());
+}
+
+#[test]
+fn reusing_connections_is_allowed_by_default() {
+    let mut g = once_game(true);
+    assert_eq!(g.route_text(g.best_route()), "AAA → ABA → ABB → BBB");
+    g.fly("ABA").unwrap();
+    g.fly("ABB").unwrap();
+    assert_eq!(via(&g, 0), ["ZZZ"]);
+    assert_eq!(via(&g, 1), ["ZZZ"]);
+    assert_eq!(g.fly("BBB"), Ok(FlyOutcome::Won));
+}
+
+#[test]
+fn each_airport_once_takes_the_next_ticket_or_none() {
+    let mut g = once_game(false);
+    assert!(g.rules().once_per_airport());
+    // The short way connects at ZZZ twice, so the best is the long way.
+    assert_eq!(g.route_text(g.best_route()), "AAA → BAA → BBA → BBB");
+    g.fly("ABA").unwrap();
+    assert_eq!(via(&g, 0), ["ZZZ"]);
+    // ZZZ is taken: ACA's spare ticket via YYY is offered, and ABB's only
+    // other ticket connects at AAA, a stop, so ABB isn't.
+    let options = g.options();
+    let codes: Vec<&str> = options.iter().map(|o| o.code).collect();
+    assert_eq!(codes, ["ACA"]);
+    assert_eq!(options[0].via, ["YYY"]);
+    assert!(matches!(g.fly("ABB"), Err(FlyError::TicketsUsed { .. })));
+    g.fly("ACA").unwrap();
+    assert_eq!(via(&g, 1), ["YYY"]);
+    // Going back frees what the hop used.
+    g.back();
+    g.back();
+    assert!(g.legs().is_empty());
+    // A connection can't be flown to later: ACA connects at ABB.
+    g.fly("ACA").unwrap();
+    assert_eq!(via(&g, 0), ["ABB"]);
+    g.fly("ABA").unwrap();
+    assert_eq!(via(&g, 1), ["ZZZ"]);
+    assert!(matches!(g.fly("ABB"), Err(FlyError::UsedAsConnection(c)) if c == "ABB"));
+    // The long way wins.
+    g.back();
+    g.back();
+    for code in ["BAA", "BBA"] {
+        g.fly(code).unwrap();
+    }
+    assert_eq!(g.fly("BBB"), Ok(FlyOutcome::Won));
+}
+
+#[test]
+fn each_airport_once_survives_a_save() {
+    let mut g = once_game(false);
+    g.fly("ABA").unwrap();
+    g.fly("ACA").unwrap();
+    let saved = g.to_saved();
+    let json = serde_json::to_string(&saved).unwrap();
+    assert!(json.contains("\"reuse_connections\":false"), "{json}");
+    // Reused connections, the default, aren't written, so old saves read the same.
+    assert!(!serde_json::to_string(&once_game(true).to_saved())
+        .unwrap()
+        .contains("reuse_connections"));
+    let back: jotto::flights::game::SavedGame = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        back.custom.as_ref().and_then(SavedRules::rules),
+        Some(once_rules(false))
+    );
+}
+
+#[test]
+fn each_airport_once_on_the_real_network() {
+    // Dealt puzzles are playable by their best route, and that route keeps to the rule.
+    for connections in [1, 2] {
+        let rules = Rules {
+            max_connections: connections,
+            ..once_rules(false)
+        };
+        assert!(!rules.count_is_exact());
+        assert!(rules.summary().contains("each airport once"));
+        for _ in 0..10 {
+            let mut g = FlightsGame::random(Difficulty::Custom, rules, Units::Nm, None).unwrap();
+            assert!(g.best_route().len() - 1 <= 6);
+            let net = g.network();
+            let mut airports: Vec<usize> = g.best_route().to_vec();
+            airports.extend(g.best_legs().iter().flat_map(|t| t.via.iter().copied()));
+            let n = airports.len();
+            airports.sort_unstable();
+            airports.dedup();
+            assert_eq!(airports.len(), n, "an airport repeats");
+            let best = g.best_route().to_vec();
+            for &stop in &best[1..] {
+                // The ticket the game gives is the one the search planned on.
+                g.fly(net.code(stop)).unwrap();
+            }
+            assert_eq!(g.status(), Status::Won);
+            assert!((g.total_distance() - g.best_distance()).abs() < 1e-6);
+        }
+    }
 }

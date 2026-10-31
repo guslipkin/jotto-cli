@@ -16,6 +16,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=JOTTO_UPDATE_WORDS");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    compress_flights_data(&out_dir);
     let wordlist_dir = out_dir.join("wordlist");
     let words_bin_path = out_dir.join("words.bin");
     let sha_cache_path = out_dir.join("words.bin.sha");
@@ -384,4 +385,17 @@ fn validate_words_bin(words_bin_path: &Path) {
         count >= 1000,
         "Expected at least 1000 words in words.bin, found {count}"
     );
+}
+
+/// Deflates `data/flights.tsv` into OUT_DIR for `src/flights/data.rs` to embed.
+/// The text stays in the repository, where a data rebuild reads as a diff, while
+/// the binary carries it at about a third of the size (the spare tickets make it
+/// the largest file Flights embeds).
+fn compress_flights_data(out_dir: &Path) {
+    let source = Path::new("data/flights.tsv");
+    println!("cargo:rerun-if-changed={}", source.display());
+    let text = fs::read(source).expect("failed to read data/flights.tsv");
+    let packed = miniz_oxide::deflate::compress_to_vec(&text, 10);
+    fs::write(out_dir.join("flights.tsv.deflate"), packed)
+        .expect("failed to write flights.tsv.deflate");
 }

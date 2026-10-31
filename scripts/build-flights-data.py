@@ -3,7 +3,7 @@
 
 Run by hand when the routes should be refreshed, not from build.rs: it reads
 thousands of Wikipedia articles, far too slow (and too unkind to Wikipedia) for
-every build, while the result is about 550 KB and is committed.
+every build, while the result is about 1 MB and is committed.
 
     python3 scripts/build-flights-data.py --cache-dir ~/.cache/flights-wiki
 
@@ -27,7 +27,8 @@ flights between such codes are rare: about 340 of the ~34,000 routes, in
 clusters of at most a couple of dozen airports, which make only a few dozen
 puzzles. So a hop is any ticket with connections, and its length is the
 shortest such itinerary's, every connection counted. The best itinerary is
-written for each limit on connections up to MAX_CONNECTIONS, along with the
+written for each limit on connections up to MAX_CONNECTIONS, and a few of the
+next best (for custom games that use each airport once), along with the
 airports they touch.
 
 The script reports the hops by number of connections and the network's largest
@@ -40,10 +41,12 @@ Progress goes to stdout and to `--log`.
 
 File format (tab-separated text, `#` comments):
     A<TAB>CODE<TAB>latitude<TAB>longitude<TAB>city<TAB>country (ISO code)
-    H<TAB>CODE<TAB>CODE<TAB>c0<TAB>c1<TAB>c2
+    H<TAB>CODE<TAB>CODE<TAB>c0<TAB>c1<TAB>c2<TAB>more
         the best itinerary with at most 0, 1 and 2 connections: comma-separated
         codes in flying order from the first code, "-" if direct, "x" if there's
-        no ticket within that limit
+        no ticket within that limit; then the next shortest itineraries (up to
+        SPARE_TICKETS with each number of connections), shortest first,
+        separated by ";", or "x" for none
     P<TAB>connections<TAB>hops<TAB>count
         valid puzzles, with at most that many connections per hop, whose
         shortest route has that many hops
@@ -83,6 +86,12 @@ REQUEST_PAUSE = 0.5
 # stops let the shortest itinerary wander through four or five airports no one
 # would book.
 MAX_CONNECTIONS = 2
+# Next-shortest itineraries kept for each hop, with each number of connections,
+# for custom games that rule out airports already on the trip (each connection
+# and stop used once). The game takes the shortest one left, and finds the best
+# route by the same rule, so a ticket missing from here is never wanted; a few
+# are enough for the trip's couple of dozen airports to rarely rule them all out.
+SPARE_TICKETS = 4
 EARTH_RADIUS_NM = 3_440.065
 
 # Subsections of "Airlines and destinations" that aren't passenger service.
@@ -384,17 +393,22 @@ def great_circle_nm(a, b):
 
 
 def find_hops(flights, coords):
-    """The shortest itinerary between each pair of airports one letter apart for
-    each limit on connections, 0 to MAX_CONNECTIONS, as {(a, b): [itinerary or
-    None per limit]} with a < b. An itinerary is its connections, in flying order.
-    The game lets a custom level choose the limit, and the best ticket within one
-    limit isn't the best within another less a stop, so each is kept.
+    """Tickets between each pair of airports one letter apart, as
+    {(a, b): (best, more)} with a < b. `best` holds the shortest itinerary for
+    each limit on connections, 0 to MAX_CONNECTIONS (None where there's none):
+    the game lets a custom level choose the limit, and the best ticket within one
+    limit isn't the best within another less a stop, so each is kept. `more` is
+    the next shortest itineraries, up to SPARE_TICKETS with each number of
+    connections, in order of length: a custom game can rule out airports already
+    on the trip, and then takes the shortest ticket left. An itinerary is its
+    connections, in flying order.
 
     Built in two halves rather than by a general search, since the bound is small:
-    from each airport, the best way (direct or one stop) to everywhere, then each
-    target is reached either that way or with one more flight in from a neighbour
-    of the target. Three flights is enough here (MAX_CONNECTIONS is 2)."""
+    from each airport, the best ways with one stop to everywhere, then each target
+    is reached either that way or with one more flight in from a neighbour of the
+    target. Three flights is enough here (MAX_CONNECTIONS is 2)."""
     assert MAX_CONNECTIONS == 2
+    keep = SPARE_TICKETS + 1
     dist = {}
 
     def leg(x, y):
@@ -418,31 +432,42 @@ def find_hops(flights, coords):
             log(f"  itineraries from {n}/{len(flights)} airports")
         if not targets[a]:
             continue
-        # best[y] = (distance, connection or None) for one or two flights a..y.
-        best = {y: (leg(a, y), None) for y in flights[a]}
+        # stop[y] = the shortest ways a..x..y with one stop, as (distance, x). One
+        # more than is kept, since joining one to a last flight can rule it out.
+        stop = defaultdict(list)
         for x in flights[a]:
             d1 = leg(a, x)
             for y in flights[x]:
-                if y == a:
-                    continue
-                d = d1 + leg(x, y)
-                if y not in best or d < best[y][0]:
-                    best[y] = (d, x)
+                if y != a:
+                    stop[y].append((d1 + leg(x, y), x))
+        for y, ways in stop.items():
+            stop[y] = heapq.nsmallest(keep + 1, ways)
         for t in targets[a]:
-            direct = [] if t in flights[a] else None
-            one = None
-            options = []
-            if t in best:
-                d, x = best[t]
-                one = [x] if x else []
-                options.append((d, one))
-            for y in flights[t]:
-                if y in best and y != a:
-                    d, x = best[y]
-                    if x != t:
-                        options.append((d + leg(y, t), ([x] if x else []) + [y]))
-            if options:
-                hops[(a, t)] = [direct, one, min(options)[1]]
+            direct = [(leg(a, t), [])] if t in flights[a] else []
+            one = [(d, [x]) for d, x in stop.get(t, [])][:keep]
+            two = heapq.nsmallest(
+                keep,
+                (
+                    (d + leg(y, t), [x, y])
+                    for y in flights[t]
+                    if y != a
+                    for d, x in stop.get(y, [])
+                    if x != t
+                ),
+            )
+            if not (direct or one or two):
+                continue
+            best = [
+                min(direct)[1] if direct else None,
+                min(direct + one)[1] if direct or one else None,
+                min(direct + one + two)[1],
+            ]
+            more, kept = [], defaultdict(int)
+            for _, it in sorted(one + two):
+                if it not in best and kept[len(it)] < SPARE_TICKETS:
+                    kept[len(it)] += 1
+                    more.append(it)
+            hops[(a, t)] = (best, more)
     return hops
 
 
@@ -507,15 +532,21 @@ def main():
         log(f"  unresolved: {title} ({n})")
 
     hops = find_hops(flights, {c: airports[c][:2] for c in flights})
-    used = {c for (a, b), its in hops.items() for it in its if it is not None for c in (a, b, *it)}
+    used = {
+        c
+        for (a, b), (best, more) in hops.items()
+        for it in best + more
+        if it is not None
+        for c in (a, b, *it)
+    }
     # Distances from the coordinates as written, so they match the game's.
     written = {c: (round(airports[c][0], 4), round(airports[c][1], 4)) for c in used}
     by_hops = {}
     for limit in range(MAX_CONNECTIONS + 1):
         adj = defaultdict(list)
         hop_nm = {}
-        for (a, b), its in hops.items():
-            via = its[limit]
+        for (a, b), (best, _) in hops.items():
+            via = best[limit]
             if via is None:
                 continue
             adj[a].append(b)
@@ -542,8 +573,9 @@ def main():
         for code in sorted(used):
             lat, lon, _, city, country = airports[code]
             f.write(f"A\t{code}\t{lat:.4f}\t{lon:.4f}\t{city}\t{country}\n")
-        for (a, b), its in sorted(hops.items()):
-            cols = ["x" if it is None else ",".join(it) or "-" for it in its]
+        for (a, b), (best, more) in sorted(hops.items()):
+            cols = ["x" if it is None else ",".join(it) or "-" for it in best]
+            cols.append(";".join(",".join(it) for it in more) or "x")
             f.write("\t".join(["H", a, b, *cols]) + "\n")
         for limit, counts in by_hops.items():
             for n, count in counts.items():

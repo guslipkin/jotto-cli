@@ -39,4 +39,9 @@ fastrand = "2.3"
 ratatui = { version = "0.29", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Inflates the Flights data, which build.rs deflates into the binary.
+miniz_oxide = "0.9"
+
+[build-dependencies]
+miniz_oxide = "0.9"
 

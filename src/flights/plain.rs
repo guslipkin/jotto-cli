@@ -4,8 +4,8 @@ use std::str::FromStr;
 use crate::contexto::game::grouped;
 use crate::flights::data::MAX_CONNECTIONS;
 use crate::flights::game::{
-    code_str, parse_code, Code, Difficulty, FlightsGame, FlyOutcome, Status, Units, MAX_HOPS,
-    MIN_HOPS,
+    code_str, parse_code, Code, Difficulty, FlightsGame, FlyOutcome, Rules, Status, Units,
+    MAX_HOPS, MIN_HOPS,
 };
 use crate::line_input::LineReader;
 use crate::save::Autosave;
@@ -78,6 +78,11 @@ pub fn run(mut game: FlightsGame, autosave: &mut Autosave) -> io::Result<()> {
                 ),
             },
             ":settings" => print_settings(&game),
+            ":defaults" => {
+                game.set_custom(Rules::default());
+                println!("Custom settings reset to their defaults.");
+                print_settings(&game);
+            }
             ":set" => match arg.map(|a| set(&mut game, a)) {
                 Some(Ok(())) => print_settings(&game),
                 Some(Err(e)) => println!("{e}"),
@@ -196,6 +201,15 @@ fn print_settings(game: &FlightsGame) {
         unused(!c.fixed_route)
     );
     println!(
+        "  reuse        {:<10} yes or no: whether connections may repeat airports{}",
+        if c.reuse_connections { "yes" } else { "no" },
+        if c.connections() == 0 {
+            " (no connections to reuse)"
+        } else {
+            ""
+        }
+    );
+    println!(
         "  hops         {:<10} {MIN_HOPS} to {MAX_HOPS}, or none: hops in the shortest route{}",
         c.max_hops.map_or("none".to_string(), |n| n.to_string()),
         unused(!c.fixed_route)
@@ -213,8 +227,10 @@ fn print_settings(game: &FlightsGame) {
     );
     match c.check() {
         Err(why) => println!("Can't play these settings: {why}."),
-        Ok(n) => println!("Puzzles with these settings: {}", grouped(n)),
+        Ok(n) if c.count_is_exact() => println!("Puzzles with these settings: {}", grouped(n)),
+        Ok(n) => println!("Puzzles with these settings: up to {}", grouped(n)),
     }
+    println!("':defaults' puts the custom settings back to their defaults.");
     println!();
 }
 
@@ -261,6 +277,13 @@ fn set(game: &mut FlightsGame, arg: &str) -> Result<(), String> {
                         .filter(|n| (MIN_HOPS..=MAX_HOPS).contains(n))
                         .ok_or(format!("Hops must be {MIN_HOPS} to {MAX_HOPS}, or none."))?,
                 ),
+            };
+        }
+        "reuse" | "repeat" => {
+            c.reuse_connections = match value {
+                "on" | "yes" | "true" => true,
+                "off" | "no" | "false" | "once" => false,
+                _ => return Err("Reuse must be yes or no.".to_string()),
             };
         }
         "places" | "cities" | "city" => {
@@ -344,8 +367,7 @@ fn print_position(game: &FlightsGame) {
         net.code(game.origin()),
         place(game.origin())
     );
-    for w in game.route().windows(2) {
-        let hop = net.hop(w[0], w[1]).expect("route legs are hops");
+    for (w, hop) in game.route().windows(2).zip(game.legs()) {
         let mut line = format!("→ {}", net.code(w[1]));
         if show_distances {
             line.push_str(&format!("  {}", units.format(hop.distance)));
@@ -416,6 +438,10 @@ fn print_help(game: &FlightsGame) {
     println!("  - A hop needs a ticket: a direct flight, or one connection (custom games choose)");
     println!("  - Distance is great-circle, and every connection counts toward it");
     println!("  - You can't fly to an airport already on your route; ':back' instead");
+    if game.rules().once_per_airport() {
+        println!("  - This game uses each airport once: no connecting through an airport twice,");
+        println!("    flying to one you've connected through, or connecting through a stop");
+    }
     println!(
         "  - Reach the destination the long way and you'll be told (and on Easy and Medium, by how"
     );
@@ -437,8 +463,13 @@ fn print_help(game: &FlightsGame) {
     }
     let custom = game.custom();
     println!(
-        "  - custom  {} ({} puzzles): ':settings' to change",
+        "  - custom  {} ({}{} puzzles): ':settings' to change",
         custom.summary(),
+        if custom.count_is_exact() {
+            ""
+        } else {
+            "up to "
+        },
         grouped(custom.puzzle_count())
     );
     println!("  Distances are shown on Easy only, until the game ends. Plain mode has no map,");
@@ -453,6 +484,7 @@ fn print_help(game: &FlightsGame) {
     println!("  :difficulty [level]  Show or change difficulty");
     println!("  :units [nm|mi|km]    Show or change distance units");
     println!("  :settings            Show the units and custom game settings");
+    println!("  :defaults            Put the custom game settings back to their defaults");
     println!("  :set <name> <value>  Change a setting (':set hops 6', ':set start LAX')");
     println!("  :giveup              Reveal a shortest route");
     println!("  :credits             Show credits");

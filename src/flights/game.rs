@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::contexto::game::grouped;
 use crate::dict;
 use crate::flights::data::{
-    letters_apart, network, Network, MAX_CONNECTIONS, STANDARD_CONNECTIONS,
+    letters_apart, network, Hop, Network, OnceRoute, Ticket, MAX_CONNECTIONS, STANDARD_CONNECTIONS,
 };
 use crate::game::sanitize_input;
 use crate::save::{self, enum_name, parse_enum, Loaded, Notice, Saveable, SAVE_VERSION};
@@ -90,6 +90,7 @@ impl Difficulty {
             fixed_route: false,
             start: None,
             end: None,
+            reuse_connections: true,
         }
     }
 
@@ -148,6 +149,10 @@ pub struct Rules {
     pub start: Option<Code>,
     /// A custom game's own destination, else a random one.
     pub end: Option<Code>,
+    /// Whether a trip may use an airport more than once, as a connection: connect
+    /// through it twice, fly to it after connecting there, or connect through a
+    /// stop. Stops themselves are never repeated (the player goes back instead).
+    pub reuse_connections: bool,
 }
 
 /// An airport code, kept as bytes so [`Rules`] stays `Copy`.
@@ -176,9 +181,15 @@ impl Default for Rules {
             fixed_route: false,
             start: None,
             end: None,
+            reuse_connections: true,
         }
     }
 }
+
+/// Random puzzles tried for a custom game that uses each airport once, before it
+/// says none fit. Most deals fit (the data's puzzles are counted with tickets
+/// reused, and about one in ten has no route without), so this is plenty.
+const ONCE_DEAL_ATTEMPTS: usize = 200;
 
 impl Rules {
     /// Most hops a dealt puzzle's shortest route has (`None`: no limit); a fixed
@@ -203,6 +214,42 @@ impl Rules {
     /// The network these rules' hops come from.
     pub fn network(&self) -> &'static Network {
         network(self.connections())
+    }
+
+    /// Whether each airport is used once in a trip, connections included. Only
+    /// when hops have connections; without, stops never repeat anyway.
+    pub fn once_per_airport(&self) -> bool {
+        !self.reuse_connections && self.connections() > 0
+    }
+
+    /// Whether `start` to `end` makes a puzzle by these rules, `max_hops` aside.
+    /// With each airport used once, that's two routes that keep to it.
+    fn playable(&self, net: &Network, start: usize, end: usize) -> bool {
+        if !self.once_per_airport() {
+            return net.is_valid_puzzle(start, end);
+        }
+        letters_apart(net.code(start), net.code(end)) == 3
+            && net.routes_once(start, end, 2).len() == 2
+    }
+
+    /// Whether these rules deal `start` to `end`: playable, and with a shortest
+    /// route within the hop limit.
+    /// Only for games that use each airport once (the others go by the counts
+    /// the search in [`Network::puzzle_ends`] makes for many ends at once).
+    fn deals(&self, net: &Network, start: usize, end: usize) -> bool {
+        letters_apart(net.code(start), net.code(end)) == 3 && {
+            let routes = net.routes_once(start, end, 2);
+            routes.len() == 2
+                && self
+                    .hop_limit()
+                    .is_none_or(|max| routes[0].stops.len() - 1 <= max)
+        }
+    }
+
+    /// Whether the puzzle count is exact: counted with tickets reused, it's only
+    /// an upper bound for a game that uses each airport once.
+    pub fn count_is_exact(&self) -> bool {
+        !self.once_per_airport() || (self.fixed_route && self.start.is_some() && self.end.is_some())
     }
 
     /// Number of puzzles these rules can deal: from the data file's counts, or for
@@ -242,10 +289,20 @@ impl Rules {
                 return Err(format!("{ca} and {cb} must differ in every letter"));
             }
             // A fixed route has no hop limit, so only these two can rule it out.
-            if !net.puzzle_ends(a, None).contains(&b) {
-                return Err(match net.shortest(a, b) {
-                    None => format!("there's no way from {ca} to {cb}"),
-                    Some(_) => format!("only one route joins {ca} and {cb}"),
+            if !self.playable(net, a, b) {
+                let routes = if self.once_per_airport() {
+                    net.routes_once(a, b, 1).len()
+                } else {
+                    usize::from(net.shortest(a, b).is_some())
+                };
+                let once = if self.once_per_airport() {
+                    " using each airport once"
+                } else {
+                    ""
+                };
+                return Err(match routes {
+                    0 => format!("there's no way from {ca} to {cb}{once}"),
+                    _ => format!("only one route joins {ca} and {cb}{once}"),
                 });
             }
         }
@@ -282,6 +339,9 @@ impl Rules {
         let pick = |ends: Vec<usize>, rng: &mut fastrand::Rng| {
             (!ends.is_empty()).then(|| ends[rng.usize(0..ends.len())])
         };
+        if self.once_per_airport() {
+            return self.deal_once(net, rng).ok_or_else(none);
+        }
         match self.fixed(net)? {
             (None, None) => net.random_puzzle(rng, self.hop_limit()).ok_or_else(none),
             (Some(a), None) => pick(net.puzzle_ends(a, self.hop_limit()), rng)
@@ -291,6 +351,29 @@ impl Rules {
                 .map(|a| (a, b))
                 .ok_or_else(none),
             (Some(a), Some(b)) => Ok((a, b)),
+        }
+    }
+
+    /// A random puzzle for a game that uses each airport once: puzzles dealt as
+    /// if tickets could be reused, until one also fits this rule.
+    fn deal_once(&self, net: &Network, rng: &mut fastrand::Rng) -> Option<(usize, usize)> {
+        match self.fixed(net).ok()? {
+            (Some(a), Some(b)) => Some((a, b)),
+            (None, None) => (0..ONCE_DEAL_ATTEMPTS).find_map(|_| {
+                let (a, b) = net.random_puzzle(rng, self.hop_limit())?;
+                self.deals(net, a, b).then_some((a, b))
+            }),
+            (Some(a), None) | (None, Some(a)) => {
+                let mut ends = net.puzzle_ends(a, self.hop_limit());
+                rng.shuffle(&mut ends);
+                // The ticket a hop gets depends on the trip so far, so a route
+                // doesn't read the same backwards: each pair is checked the way
+                // round it's played, the fixed airport where it was set.
+                ends.into_iter()
+                    .take(ONCE_DEAL_ATTEMPTS)
+                    .map(|b| if self.start.is_some() { (a, b) } else { (b, a) })
+                    .find(|&(x, y)| self.deals(net, x, y))
+            }
         }
     }
 
@@ -328,19 +411,29 @@ impl Rules {
         if self.fixed_route {
             let code = |c: &Option<Code>| c.as_ref().map_or("random", code_str).to_string();
             return format!(
-                "{} view, route {} → {}{}",
+                "{} view, route {} → {}{}{}",
                 self.view,
                 code(&self.start),
                 code(&self.end),
+                if self.once_per_airport() {
+                    ", each airport once"
+                } else {
+                    ""
+                },
                 if self.show_places { "" } else { ", no places" }
             );
         }
         format!(
-            "{} view, {}, up to {} connection{}{}",
+            "{} view, {}, up to {} connection{}{}{}",
             self.view,
             self.hops_text(),
             self.connections(),
             if self.connections() == 1 { "" } else { "s" },
+            if self.once_per_airport() {
+                ", each airport once"
+            } else {
+                ""
+            },
             if self.show_places { "" } else { ", no places" }
         )
     }
@@ -360,6 +453,17 @@ pub struct SavedRules {
     pub start: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end: Option<String>,
+    /// Saved only when off, so older saves (which predate it) reuse them.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub reuse_connections: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(b: &bool) -> bool {
+    *b
 }
 
 impl From<Rules> for SavedRules {
@@ -372,6 +476,7 @@ impl From<Rules> for SavedRules {
             fixed_route: r.fixed_route,
             start: r.start.as_ref().map(|c| code_str(c).to_string()),
             end: r.end.as_ref().map(|c| code_str(c).to_string()),
+            reuse_connections: r.reuse_connections,
         }
     }
 }
@@ -397,6 +502,7 @@ impl SavedRules {
                 fixed_route: self.fixed_route,
                 start,
                 end,
+                reuse_connections: self.reuse_connections,
             })
     }
 }
@@ -490,6 +596,13 @@ pub enum FlyError {
     /// The player is at the destination by a longer route and has to go back.
     AtDestination,
     AlreadyOnRoute(String),
+    /// The trip has already connected through it, and uses each airport once.
+    UsedAsConnection(String),
+    /// Every ticket connects through an airport the trip has already used.
+    TicketsUsed {
+        from: String,
+        to: String,
+    },
     NotOneLetter {
         from: String,
         to: String,
@@ -519,6 +632,14 @@ impl fmt::Display for FlyError {
             Self::AlreadyOnRoute(c) => write!(
                 f,
                 "{c} is already on your route. Go back to it instead of flying there."
+            ),
+            Self::UsedAsConnection(c) => write!(
+                f,
+                "You've already connected through {c}, and this game uses each airport once."
+            ),
+            Self::TicketsUsed { from, to } => write!(
+                f,
+                "Every ticket from {from} to {to} connects through an airport you've already used."
             ),
             Self::NotOneLetter { from, to } => {
                 write!(f, "{to} isn't one letter away from {from}.")
@@ -621,6 +742,8 @@ pub struct FlightOption {
     pub distance: f64,
     /// Codes of the airports the hop connects through.
     pub via: Vec<&'static str>,
+    /// The same airports, as indices.
+    pub connections: Vec<usize>,
     /// Which letter (0-2) differs from the current airport's code.
     pub changed: usize,
 }
@@ -668,8 +791,12 @@ pub struct FlightsGame {
     /// Airports on the current route, `start` first. Going back pops the last one,
     /// so legs that were flown and backtracked never count.
     route: Vec<usize>,
+    /// The ticket each hop of `route` was flown on. Usually its best, but when
+    /// each airport is used once, the best one left then.
+    legs: Vec<Ticket>,
     best_distance: f64,
     best_route: Vec<usize>,
+    best_legs: Vec<Ticket>,
     difficulty: Difficulty,
     /// What this game deals and shows.
     rules: Rules,
@@ -693,16 +820,32 @@ impl FlightsGame {
         units: Units,
         daily_date: Option<String>,
     ) -> Option<Self> {
-        let (best_distance, best_route) = net.shortest(start, end)?;
+        let rules = difficulty.rules(custom);
+        let best = if rules.once_per_airport() {
+            net.routes_once(start, end, 1).into_iter().next()?
+        } else {
+            let (distance, stops) = net.shortest(start, end)?;
+            let legs = stops
+                .windows(2)
+                .map(|w| net.hop(w[0], w[1]).expect("route legs are hops").ticket())
+                .collect();
+            OnceRoute {
+                distance,
+                stops,
+                legs,
+            }
+        };
         Some(Self {
             net,
             start,
             end,
             route: vec![start],
-            best_distance,
-            best_route,
+            legs: Vec::new(),
+            best_distance: best.distance,
+            best_route: best.stops,
+            best_legs: best.legs,
             difficulty,
-            rules: difficulty.rules(custom),
+            rules,
             custom,
             units,
             daily_date,
@@ -895,13 +1038,14 @@ impl FlightsGame {
         self.route.len() - 1
     }
 
+    /// The ticket each hop of the route was flown on.
+    pub fn legs(&self) -> &[Ticket] {
+        &self.legs
+    }
+
     /// The current route's length in nautical miles.
     pub fn total_distance(&self) -> f64 {
-        let net = self.net;
-        self.route
-            .windows(2)
-            .map(|w| net.hop(w[0], w[1]).expect("route legs are hops").distance)
-            .sum()
+        self.legs.iter().map(|t| t.distance).sum()
     }
 
     /// The shortest route's length in nautical miles.
@@ -942,6 +1086,28 @@ impl FlightsGame {
         &self.best_route
     }
 
+    /// The ticket each hop of [`FlightsGame::best_route`] takes.
+    pub fn best_legs(&self) -> &[Ticket] {
+        &self.best_legs
+    }
+
+    /// Whether the trip so far has used an airport: as a stop, or (when each
+    /// airport is used once) as a connection.
+    fn used(&self, airport: usize) -> bool {
+        self.route.contains(&airport)
+            || (self.rules.once_per_airport() && self.legs.iter().any(|t| t.via.contains(&airport)))
+    }
+
+    /// The ticket `hop` would be flown on now: its best, or when each airport is
+    /// used once, the best whose connections are all new (if any is).
+    fn ticket_for(&self, hop: &Hop) -> Option<Ticket> {
+        if self.rules.once_per_airport() {
+            hop.ticket_avoiding(|i| self.used(i))
+        } else {
+            Some(hop.ticket())
+        }
+    }
+
     /// Whether distances are shown now: when the rules show them, and on every
     /// level once the game is over.
     pub fn distances_visible(&self) -> bool {
@@ -970,20 +1136,22 @@ impl FlightsGame {
         let mut options: Vec<FlightOption> = net
             .hops(self.current())
             .iter()
-            .filter(|h| !self.route.contains(&h.to))
-            .map(|h| {
+            .filter(|h| !self.used(h.to))
+            .filter_map(|h| {
+                let ticket = self.ticket_for(h)?;
                 let code = net.code(h.to);
-                FlightOption {
+                Some(FlightOption {
                     airport: h.to,
                     code,
-                    distance: h.distance,
-                    via: h.via.iter().map(|&i| net.code(i)).collect(),
+                    distance: ticket.distance,
+                    via: ticket.via.iter().map(|&i| net.code(i)).collect(),
+                    connections: ticket.via,
                     changed: here
                         .bytes()
                         .zip(code.bytes())
                         .position(|(a, b)| a != b)
                         .expect("neighbours are one letter apart"),
-                }
+                })
             })
             .collect();
         // The destination first, when it's one hop away.
@@ -1016,18 +1184,23 @@ impl FlightsGame {
         if self.route.contains(&to) {
             return Err(FlyError::AlreadyOnRoute(code));
         }
+        if self.used(to) {
+            return Err(FlyError::UsedAsConnection(code));
+        }
         if letters_apart(&from, &code) != 1 {
             return Err(FlyError::NotOneLetter { from, to: code });
         }
-        let distance = net
-            .hop(self.current(), to)
-            .ok_or(FlyError::NoTicket {
-                from,
-                to: code,
-                max_connections: net.max_connections(),
-            })?
-            .distance;
+        let hop = net.hop(self.current(), to).ok_or(FlyError::NoTicket {
+            from: from.clone(),
+            to: code.clone(),
+            max_connections: net.max_connections(),
+        })?;
+        let ticket = self
+            .ticket_for(hop)
+            .ok_or(FlyError::TicketsUsed { from, to: code })?;
+        let distance = ticket.distance;
         self.route.push(to);
+        self.legs.push(ticket);
         if to != self.end {
             return Ok(FlyOutcome::Flew { distance });
         }
@@ -1046,6 +1219,7 @@ impl FlightsGame {
         if self.status != Status::Playing || self.route.len() < 2 {
             return None;
         }
+        self.legs.pop();
         self.route.pop()
     }
 

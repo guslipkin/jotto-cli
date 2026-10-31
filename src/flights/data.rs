@@ -7,8 +7,8 @@ use crate::dict::DAILY_EPOCH_DAY;
 /// Airports and the hops between codes one letter apart, written by
 /// `scripts/build-flights-data.py` (see its docstring for the format and sources).
 /// Committed rather than built by `build.rs`, since building it reads thousands of
-/// Wikipedia articles.
-static DATA: &str = include_str!("../../data/flights.tsv");
+/// Wikipedia articles; `build.rs` only deflates it, and [`data`] inflates it.
+static DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/flights.tsv.deflate"));
 
 /// Fixed seed for the daily puzzles, so every copy of the same build agrees on each day's.
 const DAILY_SEED: u64 = 0x464C_4947_4854_5321; // "FLIGHTS!"
@@ -40,7 +40,54 @@ pub struct Hop {
     pub via: Vec<usize>,
     /// Length in nautical miles, every flight of the itinerary counted.
     pub distance: f64,
+    /// The next shortest tickets, shortest first, for games where each airport
+    /// is used once and the best ticket's connections may already be taken.
+    pub spare: Vec<Ticket>,
 }
+
+/// An itinerary for a hop: where it connects, in flying order, and its length
+/// in nautical miles, every flight counted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ticket {
+    pub via: Vec<usize>,
+    pub distance: f64,
+}
+
+impl Hop {
+    /// The best ticket.
+    pub fn ticket(&self) -> Ticket {
+        Ticket {
+            via: self.via.clone(),
+            distance: self.distance,
+        }
+    }
+
+    /// The shortest ticket connecting through no airport `used` says is taken.
+    pub fn ticket_avoiding(&self, used: impl Fn(usize) -> bool) -> Option<Ticket> {
+        if !self.via.iter().any(|&i| used(i)) {
+            return Some(self.ticket());
+        }
+        self.spare
+            .iter()
+            .find(|t| !t.via.iter().any(|&i| used(i)))
+            .cloned()
+    }
+}
+
+/// A route found where each airport is used once (see [`Network::routes_once`]):
+/// its length, its airports (start and end included) and each hop's ticket.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnceRoute {
+    pub distance: f64,
+    pub stops: Vec<usize>,
+    pub legs: Vec<Ticket>,
+}
+
+/// Partial routes a search for [`Network::routes_once`] may look at before it
+/// gives up: far more than any puzzle here needs (most take a few hundred), but
+/// a bound, since a route that has to wind around taken airports can mean
+/// trying a great many.
+const ONCE_SEARCH_LIMIT: usize = 200_000;
 
 /// The playable network: every airport with a hop to a code one letter away, the
 /// airports those hops connect through, and the hops.
@@ -69,7 +116,18 @@ pub fn network(max_connections: usize) -> &'static Network {
         [const { OnceLock::new() }; MAX_CONNECTIONS + 1];
     let limit = max_connections.min(MAX_CONNECTIONS);
     NETWORKS[limit]
-        .get_or_init(|| Network::parse(DATA, limit).expect("data/flights.tsv is well formed"))
+        .get_or_init(|| Network::parse(data(), limit).expect("data/flights.tsv is well formed"))
+}
+
+/// The embedded data as text, inflated on first use and kept, since each limit
+/// on connections parses its own network from it.
+fn data() -> &'static str {
+    static TEXT: OnceLock<String> = OnceLock::new();
+    TEXT.get_or_init(|| {
+        let bytes = miniz_oxide::inflate::decompress_to_vec(DATA)
+            .expect("build.rs deflated data/flights.tsv");
+        String::from_utf8(bytes).expect("data/flights.tsv is UTF-8")
+    })
 }
 
 /// Great-circle distance in nautical miles between two `(lat, lon)` points (haversine).
@@ -137,10 +195,19 @@ impl Network {
                     let field = |i: usize| place.get(i).map_or("", |s| s.trim()).to_string();
                     places.push((field(0), field(1)));
                 }
-                ["H", a, b, itineraries @ ..] if itineraries.len() == MAX_CONNECTIONS + 1 => {
-                    let via = itineraries[max_connections];
-                    if via != "x" {
-                        routes.push((a.to_string(), b.to_string(), via.to_string(), n + 1));
+                // The best itinerary within each limit, then optionally more
+                // (`;`-separated), any of which may have too many connections.
+                ["H", a, b, itineraries @ ..]
+                    if (MAX_CONNECTIONS + 1..=MAX_CONNECTIONS + 2).contains(&itineraries.len()) =>
+                {
+                    let best = itineraries[max_connections];
+                    if best != "x" {
+                        let mut others: Vec<&str> = itineraries[..max_connections].to_vec();
+                        if let Some(more) = itineraries.get(MAX_CONNECTIONS + 1) {
+                            others.extend(more.split(';'));
+                        }
+                        others.retain(|&it| it != "x" && it != best);
+                        routes.push((a.to_string(), b.to_string(), best, others, n + 1));
                     }
                 }
                 ["P", limit, hops, count] => {
@@ -171,7 +238,7 @@ impl Network {
         {
             return Err("airports must be listed once each, sorted by code".to_string());
         }
-        for (a, b, via, line) in routes {
+        for (a, b, best, others, line) in routes {
             let unlisted = || format!("line {line}: hop through an unlisted airport");
             let (Some(x), Some(y)) = (network.index_of(&a), network.index_of(&b)) else {
                 return Err(unlisted());
@@ -179,34 +246,57 @@ impl Network {
             if letters_apart(&a, &b) != 1 {
                 return Err(format!("line {line}: {a} and {b} aren't one letter apart"));
             }
-            if via != "-" && via.split(',').count() > max_connections {
+            let read = |it: &str| -> Result<Vec<usize>, String> {
+                if it == "-" {
+                    return Ok(Vec::new());
+                }
+                it.split(',')
+                    .map(|c| network.index_of(c).ok_or_else(unlisted))
+                    .collect()
+            };
+            let length = |via: &[usize]| -> f64 {
+                std::iter::once(x)
+                    .chain(via.iter().copied())
+                    .chain(std::iter::once(y))
+                    .collect::<Vec<_>>()
+                    .windows(2)
+                    .map(|w| great_circle_nm(network.coords[w[0]], network.coords[w[1]]))
+                    .sum()
+            };
+            let via = read(best)?;
+            if via.len() > max_connections {
                 return Err(format!("line {line}: too many connections"));
             }
-            let via = if via == "-" {
-                Vec::new()
-            } else {
-                via.split(',')
-                    .map(|c| network.index_of(c).ok_or_else(unlisted))
-                    .collect::<Result<Vec<_>, _>>()?
-            };
-            let stops: Vec<usize> = std::iter::once(x)
-                .chain(via.iter().copied())
-                .chain(std::iter::once(y))
+            let distance = length(&via);
+            // Spare tickets within this limit, shortest first.
+            let mut spare = Vec::new();
+            for it in others {
+                let via = read(it)?;
+                if via.len() <= max_connections {
+                    let distance = length(&via);
+                    spare.push(Ticket { via, distance });
+                }
+            }
+            spare.sort_by(|p, q| p.distance.total_cmp(&q.distance));
+            let reverse = |via: &[usize]| via.iter().rev().copied().collect::<Vec<_>>();
+            let spare_back = spare
+                .iter()
+                .map(|t| Ticket {
+                    via: reverse(&t.via),
+                    distance: t.distance,
+                })
                 .collect();
-            let distance = stops
-                .windows(2)
-                .map(|w| great_circle_nm(network.coords[w[0]], network.coords[w[1]]))
-                .sum();
-            let back: Vec<usize> = via.iter().rev().copied().collect();
+            network.adj[y].push(Hop {
+                to: x,
+                via: reverse(&via),
+                distance,
+                spare: spare_back,
+            });
             network.adj[x].push(Hop {
                 to: y,
                 via,
                 distance,
-            });
-            network.adj[y].push(Hop {
-                to: x,
-                via: back,
-                distance,
+                spare,
             });
         }
         for list in &mut network.adj {
@@ -309,6 +399,108 @@ impl Network {
         }
         path.reverse();
         Some((dist[end], path))
+    }
+
+    /// Shortest distances from every airport to `end` (hops are the same both
+    /// ways), by Dijkstra.
+    fn distances_to(&self, end: usize) -> Vec<f64> {
+        let mut dist = vec![f64::INFINITY; self.len()];
+        let mut heap = BinaryHeap::new();
+        dist[end] = 0.0;
+        heap.push(Entry(0.0, end));
+        while let Some(Entry(d, node)) = heap.pop() {
+            if d > dist[node] {
+                continue;
+            }
+            for hop in &self.adj[node] {
+                let nd = d + hop.distance;
+                if nd < dist[hop.to] {
+                    dist[hop.to] = nd;
+                    heap.push(Entry(nd, hop.to));
+                }
+            }
+        }
+        dist
+    }
+
+    /// The `want` shortest routes from `start` to `end`, shortest first, when
+    /// each airport may be used only once in the whole trip: no stop or
+    /// connection twice, so a hop takes its shortest ticket whose connections are
+    /// all new (see [`Hop::ticket_avoiding`]), and can't land where an earlier
+    /// ticket connected. Fewer when there aren't that many, or the search gives up.
+    ///
+    /// The ticket a hop gets depends on the trip so far, so this searches routes
+    /// rather than airports: A*, guided by each airport's distance to `end` with
+    /// any tickets allowed, which is never longer than with fewer allowed. Routes
+    /// come off the queue shortest first, so the first to reach `end` is the
+    /// shortest and the next the runner-up.
+    pub fn routes_once(&self, start: usize, end: usize, want: usize) -> Vec<OnceRoute> {
+        let to_end = self.distances_to(end);
+        if !to_end[start].is_finite() {
+            return Vec::new();
+        }
+        // Every partial route searched: (airport, the route it extends, its ticket
+        // there, length so far). Each refers back to the one it extends.
+        let mut routes: Vec<(usize, usize, Option<Ticket>, f64)> =
+            vec![(start, usize::MAX, None, 0.0)];
+        let mut heap = BinaryHeap::new();
+        heap.push(Entry(to_end[start], 0));
+        let mut used = vec![false; self.len()];
+        let mut found = Vec::new();
+        // Marks (or clears) every airport a partial route has used.
+        let mark = |used: &mut [bool],
+                    routes: &[(usize, usize, Option<Ticket>, f64)],
+                    mut r: usize,
+                    on: bool| {
+            while r != usize::MAX {
+                let (at, from, ticket, _) = &routes[r];
+                used[*at] = on;
+                for &c in ticket.iter().flat_map(|t| &t.via) {
+                    used[c] = on;
+                }
+                r = *from;
+            }
+        };
+        while let Some(Entry(_, r)) = heap.pop() {
+            let (at, _, _, so_far) = routes[r].clone();
+            if at == end {
+                let mut stops = Vec::new();
+                let mut legs = Vec::new();
+                let mut i = r;
+                while i != usize::MAX {
+                    stops.push(routes[i].0);
+                    legs.extend(routes[i].2.clone());
+                    i = routes[i].1;
+                }
+                stops.reverse();
+                legs.reverse();
+                found.push(OnceRoute {
+                    distance: so_far,
+                    stops,
+                    legs,
+                });
+                if found.len() == want {
+                    break;
+                }
+                continue;
+            }
+            if routes.len() > ONCE_SEARCH_LIMIT {
+                break;
+            }
+            mark(&mut used, &routes, r, true);
+            for hop in &self.adj[at] {
+                if used[hop.to] || !to_end[hop.to].is_finite() {
+                    continue;
+                }
+                if let Some(ticket) = hop.ticket_avoiding(|i| used[i]) {
+                    let length = so_far + ticket.distance;
+                    routes.push((hop.to, r, Some(ticket), length));
+                    heap.push(Entry(length + to_end[hop.to], routes.len() - 1));
+                }
+            }
+            mark(&mut used, &routes, r, false);
+        }
+        found
     }
 
     /// Whether at least two different routes (never visiting an airport twice) of hops join

@@ -14,7 +14,7 @@ use ratatui::{Frame, Terminal};
 
 use crate::contexto::game::grouped;
 use crate::flights::coast::{self, clip, Bounds, Coast};
-use crate::flights::data::MAX_CONNECTIONS;
+use crate::flights::data::{Ticket, MAX_CONNECTIONS};
 use crate::flights::game::{
     code_str, parse_code, Code, Difficulty, FlightOption, FlightsGame, FlyOutcome, Rules, Status,
     Units, MAX_HOPS, MIN_HOPS,
@@ -181,20 +181,25 @@ enum Setting {
     Places,
     Mode,
     Connections,
+    Reuse,
     Hops,
     Start,
     End,
+    /// Not a setting: puts the custom ones back to their defaults.
+    Reset,
 }
 
-const SETTINGS: [Setting; 8] = [
+const SETTINGS: [Setting; 10] = [
     Setting::Units,
     Setting::View,
     Setting::Places,
     Setting::Mode,
     Setting::Connections,
+    Setting::Reuse,
     Setting::Hops,
     Setting::Start,
     Setting::End,
+    Setting::Reset,
 ];
 
 /// The settings page: a copy of the units and custom settings being edited, kept
@@ -214,6 +219,8 @@ struct SettingsPage {
     /// when they change rather than on every redraw, since each look can mean
     /// several searches of the whole network.
     status: Result<usize, String>,
+    /// Where the reset row was last drawn, for clicks (set while drawing).
+    reset_area: StdCell<Rect>,
 }
 
 impl SettingsPage {
@@ -230,7 +237,15 @@ impl SettingsPage {
             status: custom.check(),
             custom,
             problem: None,
+            reset_area: StdCell::new(Rect::default()),
         }
+    }
+
+    /// Puts the custom settings back to their defaults (the units aren't one).
+    fn reset(&mut self) {
+        let row = self.row;
+        *self = Self::new(self.units, Rules::default());
+        self.row = row;
     }
 
     /// Whether a row applies in the custom game's mode: random puzzles use the
@@ -239,6 +254,8 @@ impl SettingsPage {
         match setting {
             Setting::Connections | Setting::Hops => !self.custom.fixed_route,
             Setting::Start | Setting::End => self.custom.fixed_route,
+            // Without connections there's nothing to reuse.
+            Setting::Reuse => self.custom.connections() > 0,
             _ => true,
         }
     }
@@ -328,6 +345,8 @@ impl SettingsPage {
             }
             Setting::Places => c.show_places = !c.show_places,
             Setting::Mode => c.fixed_route = !c.fixed_route,
+            Setting::Reuse => c.reuse_connections = !c.reuse_connections,
+            Setting::Reset => return self.reset(),
             // Left and Right go back to a random airport.
             Setting::Start | Setting::End => {
                 self.code_text().clear();
@@ -426,15 +445,12 @@ impl FlightsApp {
 
     /// " via ZZZ" for the hop that arrived at the end of the route, when shown.
     fn arrival_via(&self) -> String {
-        let route = self.game.route();
-        if !self.game.rules().shows_connections() || route.len() < 2 {
-            return String::new();
+        match self.game.legs().last() {
+            Some(leg) if self.game.rules().shows_connections() => {
+                via_suffix(self.game.network(), &leg.via)
+            }
+            _ => String::new(),
         }
-        let net = self.game.network();
-        let hop = net
-            .hop(route[route.len() - 2], route[route.len() - 1])
-            .expect("route legs are hops");
-        via_suffix(net, &hop.via)
     }
 
     fn submit(&mut self) {
@@ -703,8 +719,14 @@ impl FlightsApp {
             self.show_help = false;
             return;
         }
-        if self.settings.is_some() {
-            self.close_settings(false);
+        if let Some(page) = &mut self.settings {
+            // The reset row is a button; anywhere else closes the page.
+            if rect_contains(page.reset_area.get(), col, row) {
+                page.row = SETTINGS.len() - 1;
+                page.reset();
+            } else {
+                self.close_settings(false);
+            }
             return;
         }
         if let Some(i) = self
@@ -828,6 +850,7 @@ fn run_event_loop(
                     match key.code {
                         KeyCode::Esc => app.close_settings(false),
                         KeyCode::Char('s') if ctrl => app.close_settings(false),
+                        KeyCode::Enter if SETTINGS[page.row] == Setting::Reset => page.reset(),
                         KeyCode::Enter => app.close_settings(true),
                         KeyCode::Up => page.step_row(false),
                         KeyCode::Down => page.step_row(true),
@@ -1088,10 +1111,11 @@ fn bold(color: Color) -> Style {
 /// place. The same while playing and once the game is over, so the box looks the
 /// same and the column beside the map is sized for it (see [`side_width`]).
 /// With a line of its own, the place is cut only where it would pass the box's
-/// edge (`width`). `style(airport)` colours a code.
+/// edge (`width`). `legs` are its hops' tickets; `style(airport)` colours a code.
 fn route_lines(
     game: &FlightsGame,
     route: &[usize],
+    legs: &[Ticket],
     width: usize,
     style: &dyn Fn(usize) -> Style,
     note: &dyn Fn(usize) -> Option<Span<'static>>,
@@ -1126,8 +1150,7 @@ fn route_lines(
         Span::styled("  start", gray),
     ]));
     second(&mut lines, route[0], 0);
-    for (n, w) in route.windows(2).enumerate() {
-        let hop = net.hop(w[0], w[1]).expect("route legs are hops");
+    for (n, (w, hop)) in route.windows(2).zip(legs).enumerate() {
         let changed = net
             .code(w[0])
             .bytes()
@@ -1173,7 +1196,14 @@ fn draw_route(f: &mut Frame, app: &FlightsApp, area: Rect) {
     let no_note = |_: usize| None;
     // Inside the box's borders.
     let width = usize::from(area.width.saturating_sub(2));
-    let mut lines = route_lines(game, game.route(), width, &code_style, &no_note);
+    let mut lines = route_lines(
+        game,
+        game.route(),
+        game.legs(),
+        width,
+        &code_style,
+        &no_note,
+    );
     let mut scroll_to_end = true;
     if game.status() == Status::GivenUp {
         // Both routes, and where the player's left the shortest one.
@@ -1189,6 +1219,7 @@ fn draw_route(f: &mut Frame, app: &FlightsApp, area: Rect) {
         lines.extend(route_lines(
             game,
             game.route(),
+            game.legs(),
             width,
             &code_style,
             &left_note,
@@ -1213,7 +1244,14 @@ fn draw_route(f: &mut Frame, app: &FlightsApp, area: Rect) {
                 Span::styled(text, bold(COLOR_POSITIVE))
             })
         };
-        lines.extend(route_lines(game, best, width, &best_style, &here_note));
+        lines.extend(route_lines(
+            game,
+            best,
+            game.best_legs(),
+            width,
+            &best_style,
+            &here_note,
+        ));
         scroll_to_end = false;
     } else if !game.at_destination() {
         let net = game.network();
@@ -1556,36 +1594,38 @@ fn draw_map(f: &mut Frame, app: &FlightsApp, area: Rect) {
     let game = &app.game;
     let net = game.network();
     let options = game.options();
-    let selected = app
-        .options_state
-        .selected()
-        .and_then(|i| options.get(i))
-        .map(|o| o.airport);
+    let selected_option = app.options_state.selected().and_then(|i| options.get(i));
+    let selected = selected_option.map(|o| o.airport);
     let route = game.route();
     let show_via = game.rules().shows_connections();
 
     // Each hop as the airports it flies through, connections included when shown.
-    let path_of = |a: usize, b: usize| -> Vec<usize> {
+    let path_of = |a: usize, via: &[usize], b: usize| -> Vec<usize> {
         let mut path = vec![a];
         if show_via {
-            path.extend(&net.hop(a, b).expect("route legs are hops").via);
+            path.extend(via);
         }
         path.push(b);
         path
     };
-    let flown: Vec<Vec<usize>> = route.windows(2).map(|w| path_of(w[0], w[1])).collect();
+    let flown: Vec<Vec<usize>> = route
+        .windows(2)
+        .zip(game.legs())
+        .map(|(w, leg)| path_of(w[0], &leg.via, w[1]))
+        .collect();
     let best: Vec<Vec<usize>> = if game.status() == Status::GivenUp {
         game.best_route()
             .windows(2)
-            .map(|w| path_of(w[0], w[1]))
+            .zip(game.best_legs())
+            .map(|(w, leg)| path_of(w[0], &leg.via, w[1]))
             .collect()
     } else {
         Vec::new()
     };
     // The hop to the airport selected in the list, as it would be flown (straight,
     // when connections aren't shown).
-    let preview: Vec<Vec<usize>> = selected
-        .map(|to| vec![path_of(game.current(), to)])
+    let preview: Vec<Vec<usize>> = selected_option
+        .map(|o| vec![path_of(game.current(), &o.connections, o.airport)])
         .unwrap_or_default();
 
     let mut shown: Vec<usize> = vec![game.origin(), game.destination(), game.current()];
@@ -1744,7 +1784,12 @@ fn draw_help(f: &mut Frame, game: &FlightsGame) {
                 custom.max_connections
             )
         },
-        note: grouped(custom.puzzle_count()),
+        // Counted with connections reused, so only a bound when they can't be.
+        note: if custom.count_is_exact() {
+            grouped(custom.puzzle_count())
+        } else {
+            format!("≤{}", grouped(custom.puzzle_count()))
+        },
     });
     let bullet = |text: &'static str| HelpLine::Bullet(Line::from(text));
     let page = HelpPage {
@@ -1753,11 +1798,19 @@ fn draw_help(f: &mut Frame, game: &FlightsGame) {
         sections: vec![
             HelpSection {
                 title: "Rules",
-                lines: vec![
-                    bullet("Each hop changes one letter of the code: LAX → LAS → LOS."),
-                    bullet("A hop needs a ticket, direct or 1 connection; every leg counts."),
-                    bullet("Reach it the long way and you'll be told; go back to improve."),
-                ],
+                lines: {
+                    let mut rules = vec![
+                        bullet("Each hop changes one letter of the code: LAX → LAS → LOS."),
+                        bullet("A hop needs a ticket, direct or 1 connection; every leg counts."),
+                        bullet("Reach it the long way and you'll be told; go back to improve."),
+                    ];
+                    if game.rules().once_per_airport() {
+                        rules.push(bullet(
+                            "This game uses each airport once, connections included.",
+                        ));
+                    }
+                    rules
+                },
             },
             HelpSection {
                 title: "Controls",
@@ -1827,6 +1880,15 @@ fn draw_settings(f: &mut Frame, page: &SettingsPage) {
                 if c.show_places { "On" } else { "Off" }.to_string(),
                 "beside each option",
             ),
+            Setting::Reuse => (
+                if c.reuse_connections { "Yes" } else { "No" }.to_string(),
+                if c.reuse_connections {
+                    "airports may repeat as connections"
+                } else {
+                    "each airport once, connections too"
+                },
+            ),
+            Setting::Reset => ("Reset".to_string(), "custom settings to defaults"),
             Setting::Mode => (
                 if c.fixed_route { "Route" } else { "Random" }.to_string(),
                 if c.fixed_route {
@@ -1859,6 +1921,8 @@ fn draw_settings(f: &mut Frame, page: &SettingsPage) {
         Setting::Mode => "Puzzles",
         Setting::Start => "Start",
         Setting::End => "End",
+        Setting::Reuse => "Reuse connections",
+        Setting::Reset => "Defaults",
     };
     let row_line = |i: usize, setting: Setting| {
         let selected = i == page.row;
@@ -1866,6 +1930,8 @@ fn draw_settings(f: &mut Frame, page: &SettingsPage) {
         // Rows the mode doesn't use are greyed (and skipped by Up / Down).
         let note = if page.enabled(setting) {
             note
+        } else if setting == Setting::Reuse {
+            "no connections to reuse"
         } else if c.fixed_route {
             "not used for a fixed route"
         } else {
@@ -1880,8 +1946,16 @@ fn draw_settings(f: &mut Frame, page: &SettingsPage) {
         };
         Line::from(vec![
             Span::styled(if selected { " > " } else { "   " }, base),
-            Span::styled(format!("{:<16}", name(setting)), base),
-            Span::styled(format!("◀ {v:^8} ▶"), base.add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:<18}", name(setting)), base),
+            // A button rather than a value to step through.
+            Span::styled(
+                if setting == Setting::Reset {
+                    format!("[{v:^10}]")
+                } else {
+                    format!("◀ {v:^8} ▶")
+                },
+                base.add_modifier(Modifier::BOLD),
+            ),
             Span::styled(format!("  {note}"), Style::default().fg(Color::DarkGray)),
         ])
     };
@@ -1891,13 +1965,33 @@ fn draw_settings(f: &mut Frame, page: &SettingsPage) {
         Line::from(""),
         Line::from(Span::styled("Custom game", heading)),
     ];
+    let reset = SETTINGS.len() - 1;
     lines.extend(
-        SETTINGS
+        SETTINGS[..reset]
             .iter()
             .enumerate()
             .skip(1)
             .map(|(i, &s)| row_line(i, s)),
     );
+    lines.push(Line::from(""));
+    // The reset row is a button too: where it lands, after any wrapped lines
+    // above, so a click on it can be told apart.
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    let wrapped = |lines: Vec<Line<'static>>| {
+        u16::try_from(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .line_count(inner.width),
+        )
+        .unwrap_or(u16::MAX)
+    };
+    let above = wrapped(lines.clone());
+    let reset_line = row_line(reset, SETTINGS[reset]);
+    let height = wrapped(vec![reset_line.clone()]);
+    page.reset_area.set(
+        Rect::new(inner.x, inner.y.saturating_add(above), inner.width, height).intersection(inner),
+    );
+    lines.push(reset_line);
     lines.push(Line::from(""));
     lines.push(match (&page.problem, &page.status) {
         (Some(problem), _) => Line::from(Span::styled(problem.clone(), bold(COLOR_WARNING))),
@@ -1905,8 +1999,13 @@ fn draw_settings(f: &mut Frame, page: &SettingsPage) {
             format!("Can't play these settings: {why}."),
             bold(COLOR_WARNING),
         )),
+        // Counted with connections reused, so only a bound when they can't be.
         (None, Ok(count)) => Line::from(vec![
-            Span::raw("Puzzles with these settings: "),
+            Span::raw(if c.count_is_exact() {
+                "Puzzles with these settings: "
+            } else {
+                "Puzzles with these settings: up to "
+            }),
             Span::styled(grouped(*count), bold(COLOR_POSITIVE)),
         ]),
     });
@@ -2205,6 +2304,7 @@ mod tests {
             fixed_route: false,
             start: None,
             end: None,
+            reuse_connections: true,
         };
         assert_eq!(app.game.rules(), want);
         assert_eq!(app.game.custom(), want);
@@ -2606,21 +2706,76 @@ mod tests {
         app.open_settings();
         let page = app.settings.as_mut().unwrap();
         let row = |s: Setting| SETTINGS.iter().position(|&r| r == s).unwrap();
-        // Random mode: Up / Down skip the start and end.
+        // Random mode: Up / Down skip the start and end, on to the reset button.
         page.row = row(Setting::Hops);
         page.step_row(true);
-        assert_eq!(page.row, row(Setting::Hops));
-        // Route mode: they skip the limits instead.
+        assert_eq!(SETTINGS[page.row], Setting::Reset);
+        // Route mode: they skip the limits instead (a route still has
+        // connections, so whether to reuse them still applies).
         page.row = row(Setting::Mode);
         page.change(true);
         assert!(page.custom.fixed_route);
         page.step_row(true);
+        assert_eq!(SETTINGS[page.row], Setting::Reuse);
+        page.step_row(true);
         assert_eq!(SETTINGS[page.row], Setting::Start);
         page.step_row(false);
-        assert_eq!(SETTINGS[page.row], Setting::Mode);
+        assert_eq!(SETTINGS[page.row], Setting::Reuse);
         let screen = render(&mut app, 100, 30);
         show(&screen);
         assert!(screen.contains("not used for a fixed route"));
+    }
+
+    #[test]
+    fn settings_reuse_and_reset() {
+        let mut app = app(Difficulty::Medium);
+        app.open_settings();
+        let row = |s: Setting| SETTINGS.iter().position(|&r| r == s).unwrap();
+        let page = app.settings.as_mut().unwrap();
+        page.row = row(Setting::Reuse);
+        page.change(true);
+        assert!(!page.custom.reuse_connections);
+        assert!(!page.custom.count_is_exact());
+        // Without connections, there's nothing to reuse: the row is skipped.
+        page.row = row(Setting::Connections);
+        page.change(false);
+        assert_eq!(page.custom.max_connections, 0);
+        page.step_row(true);
+        assert_eq!(SETTINGS[page.row], Setting::Hops);
+        page.row = row(Setting::Units);
+        page.change(true);
+        let units = page.units;
+        let screen = render(&mut app, 100, 30);
+        show(&screen);
+        for text in [
+            "Reuse connections",
+            "no connections to reuse",
+            "[  Reset   ]",
+        ] {
+            assert!(screen.contains(text), "no '{text}':\n{screen}");
+        }
+        // A click on the reset button puts the custom settings back, but not
+        // the units, and leaves the page open.
+        let reset = app.settings.as_ref().unwrap().reset_area.get();
+        assert!(screen
+            .lines()
+            .nth(reset.y as usize)
+            .unwrap()
+            .contains("Reset"));
+        app.handle_mouse_click(reset.x + 2, reset.y);
+        let page = app.settings.as_mut().unwrap();
+        assert_eq!(page.custom, Rules::default());
+        assert_eq!(page.units, units);
+        assert_eq!(SETTINGS[page.row], Setting::Reset);
+        // And so does the keyboard on it ([Enter], [←→] or Space).
+        page.row = row(Setting::Places);
+        page.change(true);
+        page.row = row(Setting::Reset);
+        page.change(true);
+        assert_eq!(page.custom, Rules::default());
+        // A click anywhere else still closes the page.
+        app.handle_mouse_click(0, 0);
+        assert!(app.settings.is_none());
     }
 
     #[test]
