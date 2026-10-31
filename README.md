@@ -146,6 +146,9 @@ Flights' TUI has no typed input: you move with the arrow keys (the **Help** page
 | `Up` / `Down` or Mouse Wheel | Choose an airport from the **Options** list |
 | `Right` (or `Enter`), or Click an option | Fly to the chosen airport |
 | `Left` (or `Backspace`) | Go back a hop |
+| `+` / `-`, or Mouse Wheel over the map | Zoom the map (the wheel zooms around the pointer) |
+| `W` `A` `S` `D`, or drag the map | Pan the map |
+| `0` | Fit the map to your route and options again (a new game does too) |
 | `Ctrl+S` or Click **Settings** | Open the settings page: units, and the custom game's settings (`Up` / `Down` choose, `Left` / `Right` change, typing a code sets the start or end on a fixed route, `Enter` plays a custom game, `Esc` closes; changes are kept either way) |
 | `Ctrl+U` | Cycle units (`nm` → `mi` → `km`) |
 

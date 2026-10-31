@@ -1,3 +1,4 @@
+use std::cell::Cell as StdCell;
 use std::io;
 
 use crossterm::event::{
@@ -48,14 +49,19 @@ fn short_place(text: &str) -> String {
     fit_place(text, PLACE_WIDTH)
 }
 
-/// A place cut to `width` characters, ending in "…" when it's cut.
+/// A place cut to `width` characters. Only the city is shortened, ending in
+/// "…"; the ", CC" country code always stays whole.
 fn fit_place(text: &str, width: usize) -> String {
-    if text.chars().count() > width {
-        let cut: String = text.chars().take(width.saturating_sub(1)).collect();
-        format!("{}…", cut.trim_end())
-    } else {
-        text.to_string()
+    if text.chars().count() <= width {
+        return text.to_string();
     }
+    let (city, country) = match text.rsplit_once(", ") {
+        Some((city, cc)) if cc.chars().count() <= 3 => (city, format!(", {cc}")),
+        _ => (text, String::new()),
+    };
+    let room = width.saturating_sub(country.chars().count() + 1).max(1);
+    let cut: String = city.chars().take(room).collect();
+    format!("{}…{country}", cut.trim_end())
 }
 
 /// Remarks under a stop in the route box after giving up: where the player's
@@ -141,7 +147,29 @@ struct FlightsApp {
     settings: Option<SettingsPage>,
     should_quit: bool,
     options_state: TableState,
+    /// The map's view once the player has panned or zoomed it; `None` fits it to
+    /// the route and options each frame. Kept until a new game or [0].
+    view: Option<Bounds>,
+    /// Where the map was last drawn and what it showed, for turning the mouse's
+    /// position into a place on it (set while drawing, hence a `Cell`).
+    map_frame: StdCell<Option<(Rect, Bounds)>>,
+    /// Where a drag on the map began, and the view then.
+    drag: Option<(u16, u16, Bounds)>,
 }
+
+/// A map view: `(lon_min, lon_max, lat_min, lat_max)`.
+type Bounds = (f64, f64, f64, f64);
+
+/// How much one zoom key press narrows the view.
+const ZOOM_STEP: f64 = 1.5;
+/// How much one mouse-wheel event does: far less, since a wheel sends several
+/// events a notch, and a trackpad a stream of them.
+const WHEEL_STEP: f64 = 1.1;
+/// How far one pan key moves the view, as a fraction of its width or height.
+const PAN_STEP: f64 = 0.2;
+/// Narrowest and widest the view can be zoomed, in degrees of latitude.
+const MIN_VIEW_LAT: f64 = 0.5;
+const MAX_VIEW_LAT: f64 = 200.0;
 
 /// A row of the settings page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,6 +347,9 @@ impl FlightsApp {
             message,
             show_help: false,
             settings: None,
+            view: None,
+            map_frame: StdCell::new(None),
+            drag: None,
             should_quit: false,
             options_state: TableState::default(),
         };
@@ -495,6 +526,9 @@ impl FlightsApp {
 
     fn after_restart(&mut self, message: String) {
         self.reset_selection();
+        // A new game is somewhere new, so the map fits it again.
+        self.view = None;
+        self.drag = None;
         self.message = (message, COLOR_ACCENT);
     }
 
@@ -539,6 +573,84 @@ impl FlightsApp {
             FooterAction::Settings => self.open_settings(),
             FooterAction::Quit => self.should_quit = true,
         }
+    }
+
+    /// The view the map shows: the player's, or the fitted one last drawn.
+    fn current_view(&self) -> Option<(Rect, Bounds)> {
+        let (inner, fitted) = self.map_frame.get()?;
+        Some((inner, self.view.unwrap_or(fitted)))
+    }
+
+    /// Whether (`col`, `row`) is on the map.
+    fn on_map(&self, col: u16, row: u16) -> bool {
+        self.game.rules().shows_map()
+            && self
+                .map_frame
+                .get()
+                .is_some_and(|(inner, _)| rect_contains(inner, col, row))
+    }
+
+    /// The map position under terminal cell (`col`, `row`).
+    fn map_point(&self, col: u16, row: u16) -> Option<(f64, f64)> {
+        let (inner, (x0, x1, y0, y1)) = self.current_view()?;
+        let fx = f64::from(col.saturating_sub(inner.x)) / f64::from(inner.width.max(2) - 1);
+        let fy = f64::from(row.saturating_sub(inner.y)) / f64::from(inner.height.max(2) - 1);
+        Some((x0 + fx * (x1 - x0), y1 - fy * (y1 - y0)))
+    }
+
+    /// Zooms the map by `factor` (under 1 zooms in), keeping the point under
+    /// (`col`, `row`) in place, or the middle of the view.
+    fn zoom(&mut self, factor: f64, at: Option<(u16, u16)>) {
+        let Some((_, (x0, x1, y0, y1))) = self.current_view() else {
+            return;
+        };
+        // Out no further than the cap, or the fitted view if that's wider already.
+        let widest = self
+            .map_frame
+            .get()
+            .map_or(MAX_VIEW_LAT, |(_, f)| MAX_VIEW_LAT.max(f.3 - f.2));
+        let lat_span = (y1 - y0) * factor;
+        if lat_span < MIN_VIEW_LAT || lat_span > widest {
+            return;
+        }
+        let (cx, cy) = at
+            .and_then(|(c, r)| self.map_point(c, r))
+            .unwrap_or(((x0 + x1) / 2.0, (y0 + y1) / 2.0));
+        self.view = Some((
+            cx - (cx - x0) * factor,
+            cx + (x1 - cx) * factor,
+            cy - (cy - y0) * factor,
+            cy + (y1 - cy) * factor,
+        ));
+    }
+
+    /// Moves the view by fractions of its width (`dx`, east) and height (`dy`, north).
+    fn pan(&mut self, dx: f64, dy: f64) {
+        let Some((_, (x0, x1, y0, y1))) = self.current_view() else {
+            return;
+        };
+        let (sx, sy) = ((x1 - x0) * dx, (y1 - y0) * dy);
+        self.view = Some((x0 + sx, x1 + sx, y0 + sy, y1 + sy));
+    }
+
+    /// Drags the map so the point grabbed at the drag's start follows the mouse.
+    fn drag_to(&mut self, col: u16, row: u16) {
+        let (Some((start_col, start_row, (x0, x1, y0, y1))), Some((inner, _))) =
+            (self.drag, self.map_frame.get())
+        else {
+            return;
+        };
+        let per_col = (x1 - x0) / f64::from(inner.width.max(2) - 1);
+        let per_row = (y1 - y0) / f64::from(inner.height.max(2) - 1);
+        let dx = (f64::from(col) - f64::from(start_col)) * per_col;
+        let dy = (f64::from(row) - f64::from(start_row)) * per_row;
+        self.view = Some((x0 - dx, x1 - dx, y0 + dy, y1 + dy));
+    }
+
+    /// Goes back to fitting the map to the route and options.
+    fn fit_map(&mut self) {
+        self.view = None;
+        self.drag = None;
     }
 
     fn handle_mouse_click(&mut self, col: u16, row: u16) {
@@ -624,18 +736,28 @@ fn run_event_loop(
         }
 
         match event::read()? {
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    app.handle_mouse_click(mouse.column, mouse.row)
+            Event::Mouse(mouse) => {
+                let (col, row) = (mouse.column, mouse.row);
+                let free = !app.show_help && app.settings.is_none();
+                // On the map, the wheel zooms and a drag pans; elsewhere the wheel
+                // moves the selection and a click acts.
+                let on_map = free && app.on_map(col, row);
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) if on_map => {
+                        app.drag = app.current_view().map(|(_, view)| (col, row, view));
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => app.handle_mouse_click(col, row),
+                    MouseEventKind::Drag(MouseButton::Left) => app.drag_to(col, row),
+                    MouseEventKind::Up(MouseButton::Left) => app.drag = None,
+                    MouseEventKind::ScrollUp if on_map => {
+                        app.zoom(1.0 / WHEEL_STEP, Some((col, row)))
+                    }
+                    MouseEventKind::ScrollDown if on_map => app.zoom(WHEEL_STEP, Some((col, row))),
+                    MouseEventKind::ScrollUp if free => app.move_selection(false),
+                    MouseEventKind::ScrollDown if free => app.move_selection(true),
+                    _ => {}
                 }
-                MouseEventKind::ScrollUp if !app.show_help && app.settings.is_none() => {
-                    app.move_selection(false)
-                }
-                MouseEventKind::ScrollDown if !app.show_help && app.settings.is_none() => {
-                    app.move_selection(true)
-                }
-                _ => {}
-            },
+            }
             Event::Key(key) => {
                 if key.kind != KeyEventKind::Press {
                     continue;
@@ -687,6 +809,19 @@ fn run_event_loop(
                     // the same, for anyone used to them.
                     KeyCode::Left | KeyCode::Backspace => app.go_back(),
                     KeyCode::Right | KeyCode::Enter => app.submit(),
+                    // The map: + and - zoom, WASD pan, 0 fits it again.
+                    KeyCode::Char(c) if !ctrl && app.game.rules().shows_map() => {
+                        match c.to_ascii_lowercase() {
+                            '+' | '=' => app.zoom(1.0 / ZOOM_STEP, None),
+                            '-' | '_' => app.zoom(ZOOM_STEP, None),
+                            'w' => app.pan(0.0, PAN_STEP),
+                            's' => app.pan(0.0, -PAN_STEP),
+                            'a' => app.pan(-PAN_STEP, 0.0),
+                            'd' => app.pan(PAN_STEP, 0.0),
+                            '0' => app.fit_map(),
+                            _ => {}
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1291,6 +1426,41 @@ impl MapLabels {
     }
 }
 
+/// The part of the line from `a` to `b` inside `bounds` (Liang-Barsky), since
+/// the canvas drops a line with either end outside its bounds, which a zoomed
+/// view would otherwise do to every hop running off its edge.
+fn clip(
+    a: (f64, f64),
+    b: (f64, f64),
+    (x0, x1, y0, y1): Bounds,
+) -> Option<((f64, f64), (f64, f64))> {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+    for (p, q) in [
+        (-dx, a.0 - x0),
+        (dx, x1 - a.0),
+        (-dy, a.1 - y0),
+        (dy, y1 - a.1),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let t = q / p;
+            if p < 0.0 {
+                t0 = t0.max(t);
+            } else {
+                t1 = t1.min(t);
+            }
+        }
+    }
+    (t0 <= t1).then_some((
+        (a.0 + t0 * dx, a.1 + t0 * dy),
+        (a.0 + t1 * dx, a.1 + t1 * dy),
+    ))
+}
+
 /// A canvas of just `paths` (each hop as the airports it flies through), with
 /// nothing else drawn, to lay over the map.
 fn path_canvas<'a>(
@@ -1306,7 +1476,11 @@ fn path_canvas<'a>(
             for hop in paths {
                 for w in hop.windows(2) {
                     let ((alat, alon), (blat, blon)) = (net.coords(w[0]), net.coords(w[1]));
-                    ctx.draw(&CanvasLine::new(alon, alat, blon, blat, color));
+                    if let Some(((ax, ay), (bx, by))) =
+                        clip((alon, alat), (blon, blat), (x0, x1, y0, y1))
+                    {
+                        ctx.draw(&CanvasLine::new(ax, ay, bx, by, color));
+                    }
                 }
             }
         })
@@ -1354,9 +1528,16 @@ fn draw_map(f: &mut Frame, app: &FlightsApp, area: Rect) {
     shown.extend(preview.iter().flatten());
     shown.extend(options.iter().map(|o| o.airport));
     let points: Vec<(f64, f64)> = shown.iter().map(|&i| net.coords(i)).collect();
-    let block = Block::default().borders(Borders::ALL).title(" Map ");
+    let title = if app.view.is_some() {
+        " Map · [0] fit "
+    } else {
+        " Map "
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
-    let bounds = map_bounds(&points, inner.width, inner.height);
+    let fitted = map_bounds(&points, inner.width, inner.height);
+    app.map_frame.set(Some((inner, fitted)));
+    let bounds = app.view.unwrap_or(fitted);
     let xy = |i: usize| {
         let (lat, lon) = net.coords(i);
         (lon, lat)
@@ -1447,8 +1628,9 @@ fn draw_map(f: &mut Frame, app: &FlightsApp, area: Rect) {
             let mut segments = |paths: &[Vec<usize>], color: Color| {
                 for path in paths {
                     for w in path.windows(2) {
-                        let ((ax, ay), (bx, by)) = (xy(w[0]), xy(w[1]));
-                        ctx.draw(&CanvasLine::new(ax, ay, bx, by, color));
+                        if let Some(((ax, ay), (bx, by))) = clip(xy(w[0]), xy(w[1]), bounds) {
+                            ctx.draw(&CanvasLine::new(ax, ay, bx, by, color));
+                        }
                     }
                 }
             };
@@ -1573,6 +1755,12 @@ fn draw_help(f: &mut Frame, game: &FlightsGame) {
                         ("^D", "difficulty"),
                         ("^S", "settings"),
                         ("Esc", "quit"),
+                    ]),
+                    HelpLine::Keys(vec![
+                        ("+ -", "zoom"),
+                        ("WASD", "pan"),
+                        ("0", "fit"),
+                        ("wheel drag", "the map"),
                     ]),
                 ],
             },
@@ -1856,9 +2044,9 @@ mod tests {
         let place = app.game.network().place(opt.airport);
         let screen = render(&mut app, 120, 34);
         show(&screen);
-        // Long names are cut to fit the column, so look for their start.
-        let start: String = place.chars().take(16).collect();
-        assert!(!place.is_empty() && screen.contains(&start), "no '{place}'");
+        // Long names are cut to fit the column, keeping the country code.
+        let shown = short_place(&place);
+        assert!(screen.contains(&shown), "no '{shown}' for '{place}'");
 
         let custom = Rules {
             view: Difficulty::Hard,
@@ -2035,10 +2223,99 @@ mod tests {
         let place = net.place(start);
         assert!(screen.contains(&format!("· {place}")), "'{place}' was cut");
         // In the options it's still cut to its column.
-        assert!(fit_place(&place, PLACE_WIDTH).ends_with('…'));
+        assert!(fit_place(&place, PLACE_WIDTH).contains('…'));
         // And where the box is too narrow, it's cut at the edge.
         let long = "Saint-Jacques-de-la-Lande, Ille-et-Vilaine, FR";
-        assert_eq!(fit_place(long, 10), "Saint-Jac…");
+        // Only the city is cut; the country code stays.
+        assert_eq!(fit_place(long, 14), "Saint-Jac…, FR");
+        assert_eq!(fit_place(long, PLACE_WIDTH).chars().count(), PLACE_WIDTH);
+        assert!(fit_place(long, PLACE_WIDTH).ends_with("…, FR"));
+        assert_eq!(fit_place("Las Vegas, US", 14), "Las Vegas, US");
+    }
+
+    #[test]
+    fn the_map_zooms_pans_and_fits_again() {
+        let mut app = app(Difficulty::Medium);
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains(" Map ") && !screen.contains("[0] fit"));
+        let (inner, fitted) = app.map_frame.get().unwrap();
+        let span = |b: Bounds| (b.1 - b.0, b.3 - b.2);
+
+        // Zooming in narrows the view about its middle.
+        app.zoom(1.0 / ZOOM_STEP, None);
+        let zoomed = app.view.unwrap();
+        let ((fw, fh), (zw, zh)) = (span(fitted), span(zoomed));
+        assert!((zw - fw / ZOOM_STEP).abs() < 1e-9 && (zh - fh / ZOOM_STEP).abs() < 1e-9);
+        let mid = |b: Bounds| ((b.0 + b.1) / 2.0, (b.2 + b.3) / 2.0);
+        assert!((mid(zoomed).0 - mid(fitted).0).abs() < 1e-9);
+        let screen = render(&mut app, 120, 34);
+        show(&screen);
+        assert!(screen.contains("[0] fit"));
+
+        // The wheel keeps the point under the pointer where it is.
+        let (col, row) = (inner.x + 5, inner.y + 3);
+        let before = app.map_point(col, row).unwrap();
+        app.zoom(1.0 / ZOOM_STEP, Some((col, row)));
+        let after = app.map_point(col, row).unwrap();
+        assert!((before.0 - after.0).abs() < 1e-6 && (before.1 - after.1).abs() < 1e-6);
+
+        // Panning east and north moves the view that way.
+        let v = app.view.unwrap();
+        app.pan(PAN_STEP, PAN_STEP);
+        let p = app.view.unwrap();
+        assert!(p.0 > v.0 && p.2 > v.2);
+
+        // Dragging right moves the map right: the view moves west.
+        app.drag = Some((inner.x + 10, inner.y + 5, p));
+        app.drag_to(inner.x + 20, inner.y + 5);
+        assert!(app.view.unwrap().0 < p.0);
+        app.drag = None;
+
+        // The view is kept while playing...
+        let kept = app.view;
+        app.submit();
+        render(&mut app, 120, 34);
+        assert_eq!(app.view, kept);
+        // ...until [0] or a new game.
+        app.fit_map();
+        assert_eq!(app.view, None);
+        app.zoom(1.0 / ZOOM_STEP, None);
+        app.start_new_game(None);
+        assert_eq!(app.view, None);
+    }
+
+    #[test]
+    fn zoom_has_limits() {
+        let mut app = app(Difficulty::Medium);
+        render(&mut app, 120, 34);
+        for _ in 0..40 {
+            app.zoom(1.0 / ZOOM_STEP, None);
+        }
+        let (_, (_, _, y0, y1)) = app.current_view().unwrap();
+        assert!(y1 - y0 >= MIN_VIEW_LAT);
+        for _ in 0..40 {
+            app.zoom(ZOOM_STEP, None);
+        }
+        let (_, (_, _, y0, y1)) = app.current_view().unwrap();
+        let (_, fitted) = app.map_frame.get().unwrap();
+        assert!(y1 - y0 <= MAX_VIEW_LAT.max(fitted.3 - fitted.2) + 1e-9);
+    }
+
+    #[test]
+    fn lines_are_clipped_to_the_view() {
+        let b = (0.0, 10.0, 0.0, 10.0);
+        // Inside: unchanged.
+        assert_eq!(
+            clip((1.0, 1.0), (9.0, 9.0), b),
+            Some(((1.0, 1.0), (9.0, 9.0)))
+        );
+        // Crossing the edge: cut at it.
+        let ((ax, ay), (bx, by)) = clip((-10.0, 5.0), (5.0, 5.0), b).unwrap();
+        assert_eq!((ax, ay, bx, by), (0.0, 5.0, 5.0, 5.0));
+        // Through the view with both ends outside.
+        assert!(clip((-5.0, 5.0), (15.0, 5.0), b).is_some());
+        // Wholly outside.
+        assert_eq!(clip((-5.0, -5.0), (-1.0, 20.0), b), None);
     }
 
     #[test]
