@@ -1,0 +1,22 @@
+# The four games in a web browser: `docker compose up`, then open
+# http://localhost:7681. Every browser tab is its own session. See Dockerfile.
+# Without --build it uses the released image from GHCR (built from each GitHub
+# Release by .github/workflows/docker.yml); with --build, this checkout.
+services:
+  arcade:
+    build: .
+    image: ghcr.io/guslipkin/jotto-arcade:latest
+    ports:
+      - "7681:7681"
+    restart: unless-stopped
+    # Nothing in the image needs to change or to write outside /tmp, where each
+    # session keeps its saves until it ends; a tmpfs keeps them in memory only.
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Each session runs a menu and a game; this bounds a runaway.
+    pids_limit: 256

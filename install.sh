@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installer script for jotto, wordle, contexto, and flights (https://github.com/guslipkin/jotto-cli)
+# Installer script for jotto, wordle, contexto, flights, and arcade (https://github.com/guslipkin/jotto-cli)
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/guslipkin/jotto-cli/main/install.sh | sh
@@ -8,14 +8,14 @@
 set -eu
 
 REPO="guslipkin/jotto-cli"
-BINARIES="jotto wordle contexto flights"
+BINARIES="jotto wordle contexto flights arcade"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${VERSION:-latest}"
 FROM_SOURCE=0
 
 usage() {
     cat <<EOF
-Install jotto, wordle, contexto, and flights from GitHub Releases ($REPO)
+Install jotto, wordle, contexto, flights, and arcade from GitHub Releases ($REPO)
 
 Usage:
   install.sh [OPTIONS]

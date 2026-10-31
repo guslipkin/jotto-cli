@@ -41,6 +41,16 @@ pub struct ContextoArgs {
     pub word: Option<String>,
 }
 
+/// Plays Contexto in its TUI, resuming the save as `contexto` does with no
+/// arguments, and returns any error instead of exiting: what `arcade` runs.
+pub fn play() -> Result<(), String> {
+    crate::play_saved(
+        "contexto",
+        |loaded| ContextoGame::start(None, false, None, loaded).map_err(|e| e.to_string()),
+        tui::run,
+    )
+}
+
 /// CLI entrypoint for the `contexto` binary.
 pub fn run_cli() {
     let args = ContextoArgs::parse();

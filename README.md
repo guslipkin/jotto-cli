@@ -1,6 +1,6 @@
 # Jotto, Wordle, Contexto & Flights CLI
 
-Fast, lightweight Rust CLI versions of the classic **Jotto** and **Wordle** 5-letter word games (ported from [`guslipkin/jotto`](https://github.com/guslipkin/jotto)), plus **Contexto**, an unofficial version of [Contexto](https://contexto.me/), a game of finding a word by its meaning, and **Flights**, a game of hopping between airport codes. Installing this crate provides the `jotto`, `wordle`, `contexto` and `flights` commands.
+Fast, lightweight Rust CLI versions of the classic **Jotto** and **Wordle** 5-letter word games (ported from [`guslipkin/jotto`](https://github.com/guslipkin/jotto)), plus **Contexto**, an unofficial version of [Contexto](https://contexto.me/), a game of finding a word by its meaning, and **Flights**, a game of hopping between airport codes. Installing this crate provides the `jotto`, `wordle`, `contexto` and `flights` commands, and `arcade`, all four in one program, chosen from a menu.
 
 ## Rules
 
@@ -65,7 +65,7 @@ Flights asks you to get from one airport to another by the shortest distance:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/guslipkin/jotto-cli/main/install.sh | sh
 ```
-*(Installs `jotto`, `wordle`, `contexto`, and `flights` to `~/.local/bin` by default; pass `-s -- --bin-dir /usr/local/bin` or set `INSTALL_DIR` to customize.)*
+*(Installs `jotto`, `wordle`, `contexto`, `flights`, and `arcade` to `~/.local/bin` by default; pass `-s -- --bin-dir /usr/local/bin` or set `INSTALL_DIR` to customize.)*
 
 **Windows (PowerShell):**
 ```powershell
@@ -74,7 +74,7 @@ irm https://raw.githubusercontent.com/guslipkin/jotto-cli/main/install.ps1 | iex
 
 ### Pre-built Binaries
 
-Download the latest `jotto`, `wordle`, `contexto` and `flights` binaries for Linux, macOS, or Windows from the [GitHub Releases](https://github.com/guslipkin/jotto-cli/releases) page.
+Download the latest `jotto`, `wordle`, `contexto`, `flights` and `arcade` binaries for Linux, macOS, or Windows from the [GitHub Releases](https://github.com/guslipkin/jotto-cli/releases) page.
 
 ### Build from Source
 
@@ -84,6 +84,27 @@ Requires Rust (`cargo`), `git`, and Python 3 (for SCOWL database creation at bui
 cargo install --path .
 ```
 
+### Play in a Browser (Docker)
+
+The `Dockerfile` and `docker-compose.yml` serve all four games in a web browser, for any number of players at once. They need only Docker (on Linux, macOS or Windows, x86 or ARM):
+
+```bash
+docker compose up            # the released image, from GHCR
+docker compose up --build    # or build this checkout
+```
+
+Or without this repository, the released image on its own (with the same locked-down settings `docker-compose.yml` uses):
+
+```bash
+docker run --rm -p 7681:7681 --read-only --tmpfs /tmp:mode=1777 \
+  --cap-drop ALL --security-opt no-new-privileges:true \
+  ghcr.io/guslipkin/jotto-arcade:latest
+```
+
+Then open <http://localhost:7681>. Each browser tab gets its own session: a menu of the four games, each played in its full-screen TUI. Leaving a game (`Esc`) always comes back to the menu, and the menu's **Quit** (or `q` / `Esc`) ends the session; reload the page for a new one. Players never get a command line: the image is built `FROM scratch`, with nothing in it but `arcade` (which has the four games built in, so it never starts another program) and [ttyd](https://github.com/tsl0922/ttyd), the web terminal, which runs only the menu. Saves are kept for the session alone, in memory, and are gone when it ends.
+
+The container is read-only, with every capability dropped and no privilege escalation; ttyd allows up to 32 sessions at once (change `--max-clients` in the `Dockerfile`'s `CMD`). To build for both architectures, use `docker buildx build --platform linux/amd64,linux/arm64 .`. Each published GitHub Release also builds both (on native x86_64 and arm64 runners) and pushes them to `ghcr.io/guslipkin/jotto-arcade` as one image, tagged with the release's version (`1.2.3` and `1.2`) and `latest` (not moved by a pre-release); running the Docker workflow by hand only builds it, as the binaries' release workflow does. Each session runs `arcade --session-saves` (see [Usage](#usage)).
+
 ## Usage
 
 ```bash
@@ -92,6 +113,11 @@ jotto
 wordle
 contexto
 flights
+
+# Or pick any of them from a menu: leaving a game comes back to it, and quitting
+# it returns to your shell. Games resume and save just as their own commands do.
+arcade
+arcade --session-saves   # saves kept for this run only, then removed (as the Docker image does)
 
 # Launch the deterministic UTC Daily Challenge
 jotto --daily

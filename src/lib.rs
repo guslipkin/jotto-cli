@@ -16,6 +16,36 @@ use cli::CliArgs;
 use game::{GameMode, GameState};
 use save::Autosave;
 
+/// Plays Jotto or Wordle in its TUI, resuming the save as the command does with no
+/// arguments, and returns (rather than exiting on) any error: what `arcade` runs.
+pub fn play(mode: GameMode) -> Result<(), String> {
+    play_saved(
+        mode.command_name(),
+        |loaded| GameState::start(mode, None, false, None, loaded).map_err(|e| e.to_string()),
+        tui::run,
+    )
+}
+
+/// Opens a game from its save with `start`, plays it with `run` and keeps the save
+/// up to date, returning what went wrong instead of exiting, so a caller such as
+/// `arcade` can say so and carry on.
+pub(crate) fn play_saved<S: serde::de::DeserializeOwned, G>(
+    name: &str,
+    start: impl FnOnce(save::Loaded<S>) -> Result<(G, Option<save::Notice>), String>,
+    run: fn(G, &mut Autosave) -> io::Result<()>,
+) -> Result<(), String> {
+    let path = save::save_path(name);
+    let loaded = path.as_deref().map_or(save::Loaded::Missing, save::load);
+    let (game, notice) = start(loaded)?;
+    let mut autosave = Autosave::new(path);
+    autosave.notice = notice;
+    run(game, &mut autosave).map_err(|e| e.to_string())?;
+    match autosave.error() {
+        Some(err) => Err(format!("your game wasn't saved: {err}")),
+        None => Ok(()),
+    }
+}
+
 /// Shared CLI entrypoint for both `jotto` and `wordle` binaries.
 pub fn run_cli(mode: GameMode) {
     let args = CliArgs::parse_for_mode(mode);

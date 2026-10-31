@@ -1,0 +1,8 @@
+target
+.git
+.flights-cache
+flights-build.log
+flights.md
+Dockerfile
+docker-compose.yml
+.dockerignore

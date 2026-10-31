@@ -46,6 +46,16 @@ pub struct FlightsArgs {
     pub route: Option<String>,
 }
 
+/// Plays Flights in its TUI, resuming the save as `flights` does with no
+/// arguments, and returns any error instead of exiting: what `arcade` runs.
+pub fn play() -> Result<(), String> {
+    crate::play_saved(
+        "flights",
+        |loaded| FlightsGame::start(None, false, None, None, loaded).map_err(|e| e.to_string()),
+        tui::run,
+    )
+}
+
 /// CLI entrypoint for the `flights` binary.
 pub fn run_cli() {
     let args = FlightsArgs::parse();

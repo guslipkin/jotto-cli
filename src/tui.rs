@@ -606,17 +606,22 @@ pub(crate) struct TerminalGuard;
 /// guard drops, and by a panic hook too, so a panic message prints on the normal
 /// screen rather than vanishing with the alternate one.
 pub(crate) fn enter_tui() -> io::Result<(TerminalGuard, Terminal<CrosstermBackend<io::Stdout>>)> {
-    let original_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |panic_info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            Show
-        );
-        original_hook(panic_info);
-    }));
+    // Once a process: `arcade` enters a TUI for every game it runs, and wrapping
+    // the hook each time would stack a layer per game.
+    static PANIC_HOOK: std::sync::Once = std::sync::Once::new();
+    PANIC_HOOK.call_once(|| {
+        let original_hook = panic::take_hook();
+        panic::set_hook(Box::new(move |panic_info| {
+            let _ = disable_raw_mode();
+            let _ = execute!(
+                io::stdout(),
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                Show
+            );
+            original_hook(panic_info);
+        }));
+    });
 
     enable_raw_mode()?;
     // Made before anything else can fail, so raw mode never outlives an error. It
