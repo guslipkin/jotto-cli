@@ -166,7 +166,7 @@ impl ScratchState {
     }
 }
 
-/// A Jotto or Wordle save file (see [`crate::save`]).
+/// A Jotto or Wordle save, its section of the saves file (see [`crate::save`]).
 pub type SavedGame = save::SavedGames<SavedPlay>;
 
 /// An unfinished Jotto or Wordle game, replayed on load.

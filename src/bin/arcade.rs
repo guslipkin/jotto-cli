@@ -374,7 +374,7 @@ mod tests {
     fn session_folder_is_removed() {
         let dir = SessionDir::create().unwrap();
         let path = dir.0.clone();
-        fs::write(path.join("flights.json"), "{}").unwrap();
+        fs::write(path.join("saves.json"), "{}").unwrap();
         drop(dir);
         assert!(!path.exists());
     }

@@ -52,10 +52,10 @@ fn open_saved<S: serde::de::DeserializeOwned, G, E: Display>(
     name: &str,
     start: impl FnOnce(save::Loaded<S>) -> Result<(G, Option<save::Notice>), E>,
 ) -> Result<(G, Autosave), E> {
-    let path = save::save_path(name);
-    let loaded = path.as_deref().map_or(save::Loaded::Missing, save::load);
+    let slot = save::Slot::for_game(name);
+    let loaded = slot.as_ref().map_or(save::Loaded::Missing, save::load);
     let (game, notice) = start(loaded)?;
-    let mut autosave = Autosave::new(path);
+    let mut autosave = Autosave::new(slot);
     autosave.notice = notice;
     Ok((game, autosave))
 }

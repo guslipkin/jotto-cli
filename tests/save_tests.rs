@@ -233,7 +233,7 @@ fn test_binaries_save_and_resume() {
     let dir = temp_save_dir("binaries");
     let wordle = env!("CARGO_BIN_EXE_wordle");
     play(wordle, &dir, &["--word", "crane"], "plumb\n:quit\n");
-    assert!(dir.join("wordle.json").exists());
+    assert!(dir.join("saves.json").exists());
     let out = play(wordle, &dir, &[], "crane\n");
     assert!(out.contains("Resumed your saved game."), "{out}");
     assert!(out.contains("~P~ ~L~ ~U~ ~M~ ~B~"), "{out}");
@@ -247,5 +247,16 @@ fn test_binaries_save_and_resume() {
     let out = play(contexto, &dir, &[], ":quit\n");
     assert!(out.contains("Resumed your saved game."), "{out}");
     assert!(out.contains("SEA"), "{out}");
+    // Both games saved into the one file.
+    let text = std::fs::read_to_string(dir.join("saves.json")).unwrap();
+    assert!(
+        text.contains("\"wordle\"") && text.contains("\"contexto\""),
+        "{text}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        2,
+        "saves.json and README.txt"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

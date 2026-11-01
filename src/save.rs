@@ -1,10 +1,16 @@
 //! Saved games, so a player can quit and pick up where they left off.
 //!
-//! Each game keeps one JSON file in `~/.ndt/` (`jotto.json`, `wordle.json`,
-//! `contexto.json`). It's rewritten after every change, and holds only what can't be
-//! rebuilt: the secret and the guesses (replayed on load, so derived state such as
-//! letter colours or ranks is never stale). A finished game isn't kept, so the next
-//! launch starts fresh. A `README.txt` beside them says what made the folder.
+//! Every game saves into one JSON file, `~/.ndt/saves.json`, an object with a
+//! section per game (`"jotto"`, `"wordle"`, `"contexto"`, `"flights"`). A game's
+//! section is rewritten after every change, and holds only what can't be rebuilt:
+//! the secret and the guesses (replayed on load, so derived state such as letter
+//! colours or ranks is never stale). A finished game isn't kept, so the next launch
+//! starts fresh. A `README.txt` beside it says what made the folder.
+//!
+//! Each section carries its own version and is read on its own, so one game's
+//! damaged or outdated save never costs another game its save. Saves from before
+//! the shared file (`jotto.json` and so on) are moved into it the first time it's
+//! opened.
 //!
 //! The secret is stored base64-encoded: not hidden, just not readable at a glance.
 
@@ -14,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use clap::ValueEnum;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Bumped when a saved game's shape changes; a save with another version is dropped
 /// (with a notice) rather than half-read.
@@ -31,12 +37,42 @@ pub fn save_dir() -> Option<PathBuf> {
     }
 }
 
-/// A game's save file path (`name` is the command, e.g. "wordle").
-pub fn save_path(name: &str) -> Option<PathBuf> {
-    save_dir().map(|dir| dir.join(format!("{name}.json")))
+/// The file every game saves in, inside [`save_dir`].
+pub const SAVES_FILE: &str = "saves.json";
+
+/// The games that once kept a file each (`jotto.json`, ...), moved into
+/// [`SAVES_FILE`] when it's first opened.
+const LEGACY_GAMES: [&str; 4] = ["jotto", "wordle", "contexto", "flights"];
+
+/// Where one game's save lives: its section of [`SAVES_FILE`] in a folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Slot {
+    dir: PathBuf,
+    name: String,
 }
 
-/// What reading a save file found.
+impl Slot {
+    /// `name`'s section in `dir`'s saves file.
+    pub fn new(dir: impl Into<PathBuf>, name: &str) -> Self {
+        Self {
+            dir: dir.into(),
+            name: name.to_string(),
+        }
+    }
+
+    /// A game's slot in [`save_dir`] (`name` is the command, e.g. "wordle"), or
+    /// `None` when there's no home folder to save in.
+    pub fn for_game(name: &str) -> Option<Self> {
+        save_dir().map(|dir| Self::new(dir, name))
+    }
+
+    /// The saves file this slot is a section of.
+    pub fn file(&self) -> PathBuf {
+        self.dir.join(SAVES_FILE)
+    }
+}
+
+/// What reading a save found.
 #[derive(Debug)]
 pub enum Loaded<T> {
     /// No save yet.
@@ -48,26 +84,72 @@ pub enum Loaded<T> {
 
 /// The version stamp every save carries, read first so a save of another version is
 /// recognised as such rather than reported as corrupt.
-#[derive(serde::Deserialize)]
+#[derive(Deserialize)]
 struct VersionOnly {
     version: u32,
 }
 
-/// Reads a save. `T` must carry a top-level `version` field.
-pub fn load<T: DeserializeOwned>(path: &Path) -> Loaded<T> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Loaded::Missing,
-        Err(e) => return Loaded::Unusable(format!("couldn't read it ({e})")),
+type Sections = serde_json::Map<String, serde_json::Value>;
+
+/// The saves file's sections (none if it doesn't exist yet), or why it can't be
+/// read: `Err(None)` when it's damaged, so writing it afresh is the fix, and
+/// `Err(Some(..))` when it couldn't be read at all, so it mustn't be overwritten.
+fn read_sections(path: &Path) -> Result<Sections, Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|_| None),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Sections::new()),
+        Err(e) => Err(Some(format!("couldn't read it ({e})"))),
+    }
+}
+
+/// Moves the per-game save files from before [`SAVES_FILE`] into `sections`, which
+/// is written to the saves file before the old files are deleted, so a failure
+/// part way loses nothing. An old file that isn't JSON is unusable anyway (the game
+/// would have overwritten it), so it's simply deleted; one whose game already has a
+/// section is stale and goes too.
+fn migrate_legacy(dir: &Path, sections: &mut Sections) {
+    let found: Vec<PathBuf> = LEGACY_GAMES
+        .iter()
+        .filter_map(|name| {
+            let path = dir.join(format!("{name}.json"));
+            let text = fs::read_to_string(&path).ok()?;
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                sections.entry(*name).or_insert(value);
+            }
+            Some(path)
+        })
+        .collect();
+    if found.is_empty() {
+        return;
+    }
+    let json = serde_json::to_string_pretty(sections).expect("saves serialize");
+    if write_atomically(&dir.join(SAVES_FILE), &json).is_ok() {
+        for path in found {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// Reads a game's save from its section. `T` must carry a top-level `version` field.
+pub fn load<T: DeserializeOwned>(slot: &Slot) -> Loaded<T> {
+    let path = slot.file();
+    let mut sections = match read_sections(&path) {
+        Ok(sections) => sections,
+        Err(Some(why)) => return Loaded::Unusable(why),
+        Err(None) => return Loaded::Unusable("the saves file is damaged".into()),
     };
-    match serde_json::from_str::<VersionOnly>(&text) {
+    migrate_legacy(&slot.dir, &mut sections);
+    let Some(section) = sections.remove(&slot.name) else {
+        return Loaded::Missing;
+    };
+    match VersionOnly::deserialize(&section) {
         Ok(v) if v.version != SAVE_VERSION => {
             return Loaded::Unusable("it's from a different version".into())
         }
         Ok(_) => {}
         Err(_) => return Loaded::Unusable("it's damaged".into()),
     }
-    match serde_json::from_str(&text) {
+    match T::deserialize(section) {
         Ok(saved) => Loaded::Found(saved),
         Err(_) => Loaded::Unusable("it's damaged".into()),
     }
@@ -128,18 +210,20 @@ pub mod encoded {
 /// `README.txt` for the save folder, so someone who finds a hidden `.ndt` in their
 /// home folder can tell what made it and whether it's safe to delete.
 pub const FOLDER_README: &str = concat!(
-    "This folder was made by jotto-cli, the terminal word games jotto, wordle and\n",
-    "contexto (",
+    "This folder was made by jotto-cli, the terminal games jotto, wordle, contexto\n",
+    "and flights (",
     env!("CARGO_PKG_REPOSITORY"),
     ").\n",
     "\n",
     "It holds their saved games, so you can quit a game and pick it up later:\n",
     "\n",
-    "  jotto.json, wordle.json, contexto.json\n",
-    "      One file per game, holding the game in progress, if any.\n",
+    "  saves.json\n",
+    "      One section per game (\"jotto\", \"wordle\", \"contexto\", \"flights\"),\n",
+    "      holding the game in progress, if any, and Flights' settings.\n",
     "\n",
-    "Deleting a file starts that game fresh, and deleting this folder is safe too:\n",
-    "it's made again the next time you play.\n",
+    "Deleting a game's section starts that game fresh, deleting the file starts\n",
+    "them all fresh, and deleting this folder is safe too: it's made again the\n",
+    "next time you play.\n",
     "\n",
     "So a glance doesn't spoil a game, the secret word (\"secret\") is\n",
     "base64-encoded. To read it, or to change it (encode the new word and paste it\n",
@@ -166,12 +250,14 @@ fn write_folder_readme(dir: &Path) -> io::Result<()> {
 }
 
 /// Writes `json` to `path` through a temporary file and a rename, so a crash or a
-/// full disk mid-write leaves the old save rather than half a new one.
+/// full disk mid-write leaves the old save rather than half a new one. The
+/// temporary file is named for the process, so two games saving at once can't
+/// write into each other's.
 fn write_atomically(path: &Path, json: &str) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     fs::write(&tmp, json)?;
     fs::rename(&tmp, path)
 }
@@ -238,11 +324,12 @@ pub fn start<S, G: Saveable, E>(
     Ok((new_game()?, notice))
 }
 
-/// Keeps one game's save file in step with the game: [`Autosave::sync`] after each
-/// change writes the file only if what it would save is different.
+/// Keeps one game's section of the saves file in step with the game:
+/// [`Autosave::sync`] after each change writes it only if what it would save is
+/// different.
 #[derive(Debug)]
 pub struct Autosave {
-    path: Option<PathBuf>,
+    slot: Option<Slot>,
     last: String,
     error: Option<String>,
     /// Whether the folder's README has been written this session.
@@ -252,13 +339,13 @@ pub struct Autosave {
 }
 
 impl Autosave {
-    /// Saves to `path` (none: the home folder couldn't be found, so nothing is saved).
-    pub fn new(path: Option<PathBuf>) -> Self {
-        let error = path
+    /// Saves to `slot` (none: the home folder couldn't be found, so nothing is saved).
+    pub fn new(slot: Option<Slot>) -> Self {
+        let error = slot
             .is_none()
             .then(|| "couldn't find your home folder".to_string());
         Self {
-            path,
+            slot,
             last: String::new(),
             error,
             readme_written: false,
@@ -268,22 +355,36 @@ impl Autosave {
 
     /// Writes `saved` if it changed since the last write. A failure is kept for
     /// [`Autosave::error`] rather than interrupting the game; later changes retry.
+    ///
+    /// The file is read afresh and only this game's section replaced, so a game
+    /// open in another terminal keeps its save. A damaged file is written anew
+    /// (its sections were unreadable anyway); one that can't be read isn't touched.
     pub fn sync<T: Serialize>(&mut self, saved: &T) {
-        let Some(path) = &self.path else { return };
-        let json = serde_json::to_string_pretty(saved).expect("saved games serialize");
+        let Some(slot) = &self.slot else { return };
+        let section = serde_json::to_value(saved).expect("saved games serialize");
+        let json = section.to_string();
         if json == self.last {
             return;
         }
-        match write_atomically(path, &json) {
+        let path = slot.file();
+        let mut sections = match read_sections(&path) {
+            Ok(sections) => sections,
+            Err(None) => Sections::new(),
+            Err(Some(why)) => {
+                self.error = Some(format!("couldn't update {} ({why})", path.display()));
+                return;
+            }
+        };
+        sections.insert(slot.name.clone(), section);
+        let text = serde_json::to_string_pretty(&sections).expect("saves serialize");
+        match write_atomically(&path, &text) {
             Ok(()) => {
                 self.last = json;
                 self.error = None;
                 // Once a session, after the first save made sure the folder exists.
                 // A failure here only loses the explanation, so it isn't reported.
                 if !self.readme_written {
-                    if let Some(dir) = path.parent() {
-                        let _ = write_folder_readme(dir);
-                    }
+                    let _ = write_folder_readme(&slot.dir);
                     self.readme_written = true;
                 }
             }
@@ -312,8 +413,8 @@ pub fn parse_enum<E: ValueEnum>(name: &str) -> Option<E> {
     E::from_str(name, true).ok()
 }
 
-/// A save file holding at most one unfinished game, `P` (Flights' saves more).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+/// A game's save holding at most one unfinished game, `P` (Flights' saves more).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedGames<P> {
     pub version: u32,
     /// The unfinished game, if any.
@@ -353,18 +454,23 @@ mod tests {
     #[test]
     fn writes_only_changes_and_reads_back() {
         let dir = temp_dir("roundtrip");
-        let path = dir.join("game.json");
-        assert!(matches!(load::<Saved>(&path), Loaded::Missing));
+        let slot = Slot::new(&dir, "wordle");
+        let path = slot.file();
+        assert!(matches!(load::<Saved>(&slot), Loaded::Missing));
 
-        let mut autosave = Autosave::new(Some(path.clone()));
+        let mut autosave = Autosave::new(Some(slot.clone()));
         let saved = Saved {
             version: SAVE_VERSION,
             words: vec!["crane".into()],
         };
         autosave.sync(&saved);
         assert!(autosave.error().is_none());
-        assert!(!path.with_extension("json.tmp").exists());
-        match load::<Saved>(&path) {
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            2,
+            "only the saves file and README, no temporary file left"
+        );
+        match load::<Saved>(&slot) {
             Loaded::Found(s) => assert_eq!(s, saved),
             other => panic!("expected the save back, got {other:?}"),
         }
@@ -384,17 +490,111 @@ mod tests {
     }
 
     #[test]
+    fn games_share_the_file_without_overwriting_each_other() {
+        let dir = temp_dir("shared");
+        let (wordle, jotto) = (Slot::new(&dir, "wordle"), Slot::new(&dir, "jotto"));
+        let save = |words: &[&str]| Saved {
+            version: SAVE_VERSION,
+            words: words.iter().map(|w| w.to_string()).collect(),
+        };
+        // Two games open at once, each saving after the other.
+        let mut a = Autosave::new(Some(wordle.clone()));
+        let mut b = Autosave::new(Some(jotto.clone()));
+        a.sync(&save(&["crane"]));
+        b.sync(&save(&["plumb"]));
+        a.sync(&save(&["crane", "slate"]));
+        assert!(
+            matches!(load::<Saved>(&wordle), Loaded::Found(s) if s == save(&["crane", "slate"]))
+        );
+        assert!(matches!(load::<Saved>(&jotto), Loaded::Found(s) if s == save(&["plumb"])));
+
+        let text = fs::read_to_string(wordle.file()).unwrap();
+        let sections: Sections = serde_json::from_str(&text).unwrap();
+        assert_eq!(sections.keys().collect::<Vec<_>>(), ["jotto", "wordle"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn other_versions_and_damage_are_unusable() {
         let dir = temp_dir("bad");
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("game.json");
+        let slot = Slot::new(&dir, "wordle");
+        let path = slot.file();
+        let good = r#""jotto": {"version": 1, "words": ["plumb"]}"#;
 
-        fs::write(&path, r#"{"version": 999, "words": []}"#).unwrap();
-        assert!(matches!(load::<Saved>(&path), Loaded::Unusable(why) if why.contains("version")));
+        // One game's bad section leaves the others readable.
+        for (section, why) in [
+            (r#"{"version": 999, "words": []}"#, "version"),
+            (r#"{"version": 1, "words": 3}"#, "damaged"),
+            ("[]", "damaged"),
+        ] {
+            fs::write(&path, format!(r#"{{"wordle": {section}, {good}}}"#)).unwrap();
+            assert!(matches!(load::<Saved>(&slot), Loaded::Unusable(w) if w.contains(why)));
+            assert!(matches!(
+                load::<Saved>(&Slot::new(&dir, "jotto")),
+                Loaded::Found(_)
+            ));
+        }
+
+        // A damaged file is reported, then written afresh by the next save.
         fs::write(&path, "{not json").unwrap();
-        assert!(matches!(load::<Saved>(&path), Loaded::Unusable(why) if why.contains("damaged")));
-        fs::write(&path, r#"{"version": 1, "words": 3}"#).unwrap();
-        assert!(matches!(load::<Saved>(&path), Loaded::Unusable(_)));
+        assert!(matches!(load::<Saved>(&slot), Loaded::Unusable(why) if why.contains("damaged")));
+        let saved = Saved {
+            version: SAVE_VERSION,
+            words: vec![],
+        };
+        let mut autosave = Autosave::new(Some(slot.clone()));
+        autosave.sync(&saved);
+        assert!(autosave.error().is_none());
+        assert!(matches!(load::<Saved>(&slot), Loaded::Found(s) if s == saved));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_per_game_files_move_into_the_saves_file() {
+        let dir = temp_dir("legacy");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("wordle.json"),
+            r#"{"version": 1, "words": ["crane"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("jotto.json"),
+            r#"{"version": 1, "words": ["plumb"]}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("contexto.json"), "{not json").unwrap();
+        fs::write(dir.join("notes.json"), "{}").unwrap();
+
+        // Opening any one game moves every old file.
+        let jotto = Slot::new(&dir, "jotto");
+        assert!(matches!(load::<Saved>(&jotto), Loaded::Found(s) if s.words == ["plumb"]));
+        for name in ["wordle", "jotto", "contexto"] {
+            assert!(
+                !dir.join(format!("{name}.json")).exists(),
+                "{name}.json left"
+            );
+        }
+        assert!(
+            dir.join("notes.json").exists(),
+            "files not ours are left alone"
+        );
+        let wordle = Slot::new(&dir, "wordle");
+        assert!(matches!(load::<Saved>(&wordle), Loaded::Found(s) if s.words == ["crane"]));
+        assert!(matches!(
+            load::<Saved>(&Slot::new(&dir, "contexto")),
+            Loaded::Missing
+        ));
+
+        // An old file beside a section that's already there is stale.
+        fs::write(
+            dir.join("wordle.json"),
+            r#"{"version": 1, "words": ["stale"]}"#,
+        )
+        .unwrap();
+        assert!(matches!(load::<Saved>(&wordle), Loaded::Found(s) if s.words == ["crane"]));
+        assert!(!dir.join("wordle.json").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

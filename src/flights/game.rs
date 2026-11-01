@@ -721,7 +721,7 @@ pub struct FlightOption {
     pub changed: usize,
 }
 
-/// A `flights` save file (see [`crate::save`]). Units and custom settings are kept
+/// A `flights` save, its section of the saves file (see [`crate::save`]). Units and custom settings are kept
 /// even when no game is in progress, since they're the player's preferences
 /// rather than the game's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

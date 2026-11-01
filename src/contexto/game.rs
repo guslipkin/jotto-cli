@@ -248,7 +248,7 @@ pub enum Status {
     GivenUp,
 }
 
-/// A `contexto` save file (see [`crate::save`]).
+/// A `contexto` save, its section of the saves file (see [`crate::save`]).
 pub type SavedGame = save::SavedGames<SavedPlay>;
 
 /// An unfinished `contexto` game, replayed on load. Ranks aren't saved: replaying
