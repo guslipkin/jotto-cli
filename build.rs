@@ -16,7 +16,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=JOTTO_UPDATE_WORDS");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
-    compress_flights_data(&out_dir);
+    compress_data(&out_dir);
     let wordlist_dir = out_dir.join("wordlist");
     let words_bin_path = out_dir.join("words.bin");
     let sha_cache_path = out_dir.join("words.bin.sha");
@@ -387,15 +387,47 @@ fn validate_words_bin(words_bin_path: &Path) {
     );
 }
 
-/// Deflates `data/flights.tsv` into OUT_DIR for `src/flights/data.rs` to embed.
-/// The text stays in the repository, where a data rebuild reads as a diff, while
-/// the binary carries it at about a third of the size (the spare tickets make it
-/// the largest file Flights embeds).
-fn compress_flights_data(out_dir: &Path) {
-    let source = Path::new("data/flights.tsv");
+/// Deflates the committed data files into OUT_DIR for the games to embed. The
+/// files stay as they are in the repository, where a data rebuild reads as a
+/// diff, while the binaries carry them packed. Contexto's meaning vectors barely
+/// deflate (they're near-random bytes), so only the word lists before them are
+/// packed, and the vectors are embedded as they are, to be read in place.
+fn compress_data(out_dir: &Path) {
+    deflate("flights.tsv", &read_data("flights.tsv"), out_dir);
+    deflate("coastlines.bin", &read_data("coastlines.bin"), out_dir);
+    let contexto = read_data("contexto.bin");
+    let split = contexto_vectors_start(&contexto);
+    deflate("contexto.bin", &contexto[..split], out_dir);
+    fs::write(out_dir.join("contexto.vectors"), &contexto[split..])
+        .expect("failed to write contexto.vectors");
+}
+
+fn read_data(name: &str) -> Vec<u8> {
+    let source = Path::new("data").join(name);
     println!("cargo:rerun-if-changed={}", source.display());
-    let text = fs::read(source).expect("failed to read data/flights.tsv");
-    let packed = miniz_oxide::deflate::compress_to_vec(&text, 10);
-    fs::write(out_dir.join("flights.tsv.deflate"), packed)
-        .expect("failed to write flights.tsv.deflate");
+    fs::read(&source).unwrap_or_else(|e| panic!("failed to read {}: {e}", source.display()))
+}
+
+/// Writes `bytes` deflated to OUT_DIR/`name`.deflate.
+fn deflate(name: &str, bytes: &[u8], out_dir: &Path) {
+    let packed = miniz_oxide::deflate::compress_to_vec(bytes, 10);
+    fs::write(out_dir.join(format!("{name}.deflate")), packed)
+        .unwrap_or_else(|e| panic!("failed to write {name}.deflate: {e}"));
+}
+
+/// Where contexto.bin's vectors begin: after its 8-byte header, three
+/// length-prefixed word lists (the first of them one word per line) and a
+/// ranked flag per word (see `scripts/build-contexto-data.py`).
+fn contexto_vectors_start(data: &[u8]) -> usize {
+    let mut pos = 8;
+    let mut words = 0;
+    for i in 0..3 {
+        let len = u32::from_le_bytes(data[pos..pos + 4].try_into().expect("4 bytes")) as usize;
+        let blob = &data[pos + 4..pos + 4 + len];
+        if i == 0 && !blob.is_empty() {
+            words = blob.iter().filter(|&&b| b == b'\n').count() + 1;
+        }
+        pos += 4 + len;
+    }
+    pos + words
 }

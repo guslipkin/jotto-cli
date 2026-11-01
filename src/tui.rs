@@ -1,10 +1,11 @@
 use std::io::{self, stdout};
+use std::ops::ControlFlow;
 use std::panic;
 
 use crossterm::cursor::Show;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEventKind,
+    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -23,12 +24,23 @@ use crate::game::{
 };
 use crate::help::{draw_help_page, HelpLine, HelpPage, HelpSection};
 use crate::save::{Autosave, Notice};
+use crate::text::plural;
 
 /// Okabe-Ito colorblind-safe palette
-pub(crate) const COLOR_ACCENT: Color = Color::Rgb(86, 180, 233); // Sky Blue (#56B4E9)
-pub(crate) const COLOR_POSITIVE: Color = Color::Rgb(0, 158, 115); // Bluish-Green (#009E73)
-pub(crate) const COLOR_NEGATIVE: Color = Color::Rgb(213, 94, 0); // Vermilion / Orange-Red (#D55E00)
-pub(crate) const COLOR_WARNING: Color = Color::Rgb(230, 159, 0); // Orange (#E69F00)
+pub const COLOR_ACCENT: Color = Color::Rgb(86, 180, 233); // Sky Blue (#56B4E9)
+pub const COLOR_POSITIVE: Color = Color::Rgb(0, 158, 115); // Bluish-Green (#009E73)
+pub const COLOR_NEGATIVE: Color = Color::Rgb(213, 94, 0); // Vermilion / Orange-Red (#D55E00)
+pub const COLOR_WARNING: Color = Color::Rgb(230, 159, 0); // Orange (#E69F00)
+
+/// Bold text in `color`.
+pub fn bold(color: Color) -> Style {
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+/// A badge: bold black text on `bg`.
+pub fn black_on(bg: Color) -> Style {
+    bold(Color::Black).bg(bg)
+}
 
 /// The background every TUI paints: true black (RGB 0, 0, 0, pixels off) rather
 /// than the terminal's own background or its palette's "black", which many
@@ -54,60 +66,233 @@ pub(crate) const MIN_RECOMMENDED_WIDTH: u16 = 36;
 /// side, as on a phone held upright or a narrow window.
 pub(crate) const NARROW_WIDTH: u16 = 80;
 
-/// Where `actions`' footer buttons go in `area`: in as few rows as let each
-/// show its "[key] label" whole inside its border, the rows as evenly filled as
-/// can be (so seven buttons go 4 + 3, not 6 + 1).
-pub(crate) fn footer_areas(area: Rect, actions: &[(&str, &str)]) -> Vec<Rect> {
-    let rows = footer_rows(area.width, actions);
-    let per_row = actions.len().div_ceil(rows).max(1);
-    let row_areas = Layout::default()
+/// A TUI's footer of clickable buttons, `(action, key, label)` each, and where
+/// each was last drawn, for the mouse.
+pub(crate) struct Footer<A: 'static> {
+    actions: &'static [(A, &'static str, &'static str)],
+    pub(crate) buttons: Vec<Rect>,
+}
+
+impl<A: Copy> Footer<A> {
+    pub(crate) fn new(actions: &'static [(A, &'static str, &'static str)]) -> Self {
+        Self {
+            actions,
+            buttons: vec![Rect::default(); actions.len()],
+        }
+    }
+
+    /// Rows of buttons a terminal `width` wide needs: as few as let each show
+    /// its "[key] label" whole inside its border.
+    fn rows(&self, width: u16) -> usize {
+        // "[key] label" plus a border either side.
+        let need = self
+            .actions
+            .iter()
+            .map(|(_, key, label)| key.chars().count() + 1 + label.chars().count() + 2)
+            .max()
+            .unwrap_or(1);
+        let fit = (usize::from(width) / need).clamp(1, self.actions.len().max(1));
+        self.actions.len().div_ceil(fit).max(1)
+    }
+
+    /// Height of the footer on a terminal `width` wide.
+    pub(crate) fn height(&self, width: u16) -> u16 {
+        self.rows(width) as u16 * 3
+    }
+
+    /// Draws the buttons in `area`, the rows as evenly filled as can be (so
+    /// seven buttons go 4 + 3, not 6 + 1), and notes where each went.
+    pub(crate) fn draw(&mut self, f: &mut Frame, area: Rect) {
+        let rows = self.rows(area.width);
+        let per_row = self.actions.len().div_ceil(rows).max(1);
+        let row_areas = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(vec![Constraint::Length(3); rows])
+            .split(area);
+        self.buttons = self
+            .actions
+            .chunks(per_row)
+            .zip(row_areas.iter())
+            .flat_map(|(row, &row_area)| {
+                Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints(vec![Constraint::Ratio(1, row.len() as u32); row.len()])
+                    .split(row_area)
+                    .to_vec()
+            })
+            .collect();
+        for (&(_, key, label), &button) in self.actions.iter().zip(&self.buttons) {
+            let btn = Paragraph::new(Line::from(vec![
+                Span::styled(format!("{key} "), bold(COLOR_ACCENT)),
+                Span::styled(label, Style::default().fg(Color::White)),
+            ]))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL));
+            f.render_widget(btn, button);
+        }
+    }
+
+    /// Forgets where the buttons were, when the screen doesn't show them.
+    pub(crate) fn clear(&mut self) {
+        self.buttons.fill(Rect::default());
+    }
+
+    /// The action of the button at terminal cell (`col`, `row`), if any.
+    pub(crate) fn hit(&self, col: u16, row: u16) -> Option<A> {
+        let i = self
+            .buttons
+            .iter()
+            .position(|&r| rect_contains(r, col, row))?;
+        Some(self.actions[i].0)
+    }
+}
+
+/// On a terminal narrower than [`MIN_RECOMMENDED_WIDTH`], fills it with a note
+/// saying so, in a box titled `title` that suggests `command --plain`, and
+/// returns `true`; otherwise draws nothing.
+pub(crate) fn draw_too_narrow(f: &mut Frame, title: &str, command: &str) -> bool {
+    let width = f.area().width;
+    if width >= MIN_RECOMMENDED_WIDTH {
+        return false;
+    }
+    let warning = Paragraph::new(vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "Terminal Width Too Narrow",
+            bold(COLOR_WARNING),
+        )),
+        Line::from(""),
+        Line::from(format!(
+            "Current width: {width} columns (minimum recommended: {MIN_RECOMMENDED_WIDTH} columns)."
+        )),
+        Line::from(format!(
+            "Please widen your terminal window, or run `{command} --plain`."
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press [Esc] or [Ctrl+C] to quit.",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ])
+    .alignment(Alignment::Center)
+    .wrap(Wrap { trim: true })
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title.to_string())
+            .border_style(Style::default().fg(COLOR_WARNING)),
+    );
+    f.render_widget(warning, f.area());
+    true
+}
+
+/// A game screen's `[header, body, footer]` areas, the body at least
+/// `min_body` rows, and whether the screen is narrow (below [`NARROW_WIDTH`]),
+/// where the header gets a second line to wrap onto rather than be cut.
+pub(crate) fn screen_areas<A: Copy>(
+    area: Rect,
+    footer: &Footer<A>,
+    min_body: u16,
+) -> ([Rect; 3], bool) {
+    let narrow = area.width < NARROW_WIDTH;
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(vec![Constraint::Length(3); rows])
+        .constraints([
+            Constraint::Length(if narrow { 4 } else { 3 }),
+            Constraint::Min(min_body),
+            Constraint::Length(footer.height(area.width)),
+        ])
         .split(area);
-    actions
-        .chunks(per_row)
-        .zip(row_areas.iter())
-        .flat_map(|(row, &row_area)| {
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints(vec![Constraint::Ratio(1, row.len() as u32); row.len()])
-                .split(row_area)
-                .to_vec()
-        })
+    ([chunks[0], chunks[1], chunks[2]], narrow)
+}
+
+/// A header's opening spans: the game's `title` badge, and the daily badge
+/// when the game is a daily one.
+pub(crate) fn header_spans(title: &str, daily: Option<&str>) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(title.to_string(), black_on(COLOR_ACCENT))];
+    if let Some(date) = daily {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!(" DAILY {date} UTC "),
+            black_on(COLOR_POSITIVE),
+        ));
+    }
+    spans
+}
+
+/// Draws a header line in its box, wrapping rather than cutting it.
+pub(crate) fn draw_header(f: &mut Frame, spans: Vec<Span>, area: Rect) {
+    f.render_widget(
+        Paragraph::new(Line::from(spans))
+            .wrap(Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL)),
+        area,
+    );
+}
+
+/// Draws a frame with `draw`, on true black when colours are on (see
+/// [`paint_background`]).
+pub(crate) fn draw_on_black(f: &mut Frame, use_color: bool, draw: impl FnOnce(&mut Frame)) {
+    draw(f);
+    if use_color {
+        paint_background(f.buffer_mut());
+    }
+}
+
+/// A status message as lines in `color`, one per line of `msg`.
+pub(crate) fn status_lines(msg: &str, color: Color) -> Vec<Line<'_>> {
+    msg.lines()
+        .map(|line| Line::from(Span::styled(line, Style::default().fg(color))))
         .collect()
 }
 
-/// Rows of footer buttons a terminal `width` wide needs for `actions`.
-fn footer_rows(width: u16, actions: &[(&str, &str)]) -> usize {
-    // "[key] label" plus a border either side.
-    let need = actions
-        .iter()
-        .map(|(key, label)| key.chars().count() + 1 + label.chars().count() + 2)
-        .max()
-        .unwrap_or(1);
-    let fit = (usize::from(width) / need).clamp(1, actions.len().max(1));
-    actions.len().div_ceil(fit).max(1)
+/// Draws a status message in its box, wrapped to fit.
+pub(crate) fn draw_status(f: &mut Frame, area: Rect, msg: &str, color: Color) {
+    f.render_widget(
+        Paragraph::new(status_lines(msg, color))
+            .wrap(Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL).title(" Status ")),
+        area,
+    );
 }
 
-/// Height of the footer [`footer_areas`] lays out.
-pub(crate) fn footer_height(width: u16, actions: &[(&str, &str)]) -> u16 {
-    footer_rows(width, actions) as u16 * 3
+#[cfg(test)]
+/// What `draw` puts on a `width` by `height` screen.
+pub(crate) fn render_buffer(
+    width: u16,
+    height: u16,
+    draw: impl FnOnce(&mut Frame),
+) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    terminal.draw(draw).unwrap();
+    terminal.backend().buffer().clone()
 }
 
-/// Draws one footer button: its key in the accent colour, then its label.
-pub(crate) fn draw_footer_button(f: &mut Frame, area: Rect, key: &str, label: &str) {
-    let btn = Paragraph::new(Line::from(vec![
-        Span::styled(
-            format!("{key} "),
-            Style::default()
-                .fg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(label.to_string(), Style::default().fg(Color::White)),
-    ]))
-    .alignment(Alignment::Center)
-    .block(Block::default().borders(Borders::ALL));
-    f.render_widget(btn, area);
+#[cfg(test)]
+/// A screen's text, a line per row.
+pub(crate) fn screen_text(buf: &ratatui::buffer::Buffer) -> String {
+    let area = buf.area;
+    (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Moves a list's selection one row down (or up), staying within its `len` rows.
+pub(crate) fn step_selection(state: &mut TableState, len: usize, down: bool) {
+    if len == 0 {
+        return;
+    }
+    let i = state.selected().unwrap_or(0);
+    state.select(Some(if down {
+        (i + 1).min(len - 1)
+    } else {
+        i.saturating_sub(1)
+    }));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,7 +331,7 @@ struct TuiApp {
     guess_area: Rect,
     scratch_area: Rect,
     status_area: Rect,
-    footer_buttons: [Rect; 7],
+    footer: Footer<FooterAction>,
     message: Option<(String, Color)>,
     show_help: bool,
     should_quit: bool,
@@ -184,7 +369,7 @@ impl TuiApp {
             guess_area: Rect::default(),
             scratch_area: Rect::default(),
             status_area: Rect::default(),
-            footer_buttons: [Rect::default(); 7],
+            footer: Footer::new(&FOOTER_ACTIONS),
             message: Some(initial_message),
             show_help: false,
             should_quit: false,
@@ -242,15 +427,10 @@ impl TuiApp {
                     self.table_state.select(Some(row_idx));
                     let dup_msg = match mode {
                         GameMode::Jotto => format!(
-                            "Already guessed '{}' in Round {} ({} {} in common).",
+                            "Already guessed '{}' in Round {} ({} in common).",
                             round.guess.to_ascii_uppercase(),
                             round.round,
-                            round.common,
-                            if round.common == 1 {
-                                "letter"
-                            } else {
-                                "letters"
-                            }
+                            plural(round.common, "letter", "letters"),
                         ),
                         GameMode::Wordle => format!(
                             "Already guessed '{}' in Guess {}.",
@@ -281,36 +461,23 @@ impl TuiApp {
                                     "guesses"
                                 }
                             ),
-                            GameMode::Wordle => format!(
-                                "You guessed {} in {}/{}!\nClick/[C] Copy | [^N] New Game",
-                                self.game.secret_word().to_ascii_uppercase(),
-                                self.game.history().len(),
-                                MAX_WORDLE_GUESSES
-                            ),
+                            GameMode::Wordle => {
+                                self.message = self.wordle_end_message("Click/[C] Copy");
+                                return;
+                            }
                         };
                         self.message = Some((win_msg, COLOR_POSITIVE));
                     }
                     GameStatus::Lost => {
-                        self.message = Some((
-                            format!(
-                                "Out of guesses! Word: {}\nClick/[C] Copy | [^N] New Game",
-                                self.game.secret_word().to_ascii_uppercase()
-                            ),
-                            COLOR_NEGATIVE,
-                        ));
+                        self.message = self.wordle_end_message("Click/[C] Copy");
                     }
                     GameStatus::Playing | GameStatus::GivenUp => {
                         let status_msg = match mode {
                             GameMode::Jotto => format!(
-                                "Round {}: '{}' has {} {} in common.{}",
+                                "Round {}: '{}' has {} in common.{}",
                                 round.round,
                                 round.guess.to_ascii_uppercase(),
-                                round.common,
-                                if round.common == 1 {
-                                    "letter"
-                                } else {
-                                    "letters"
-                                },
+                                plural(round.common, "letter", "letters"),
                                 if round.common == 0 {
                                     " Its letters are scratched out."
                                 } else {
@@ -402,20 +569,8 @@ impl TuiApp {
         };
     }
 
-    fn scroll_history_up(&mut self) {
-        let len = self.game.history().len();
-        if len > 0 {
-            let i = self.table_state.selected().unwrap_or(0);
-            self.table_state.select(Some(i.saturating_sub(1)));
-        }
-    }
-
-    fn scroll_history_down(&mut self) {
-        let len = self.game.history().len();
-        if len > 0 {
-            let i = self.table_state.selected().unwrap_or(0);
-            self.table_state.select(Some((i + 1).min(len - 1)));
-        }
+    fn scroll_history(&mut self, down: bool) {
+        step_selection(&mut self.table_state, self.game.history().len(), down);
     }
 
     fn copy_wordle_summary(&mut self) {
@@ -427,29 +582,26 @@ impl TuiApp {
         }
         let summary = self.game.wordle_share_summary();
         let _ = copy_to_clipboard(&summary);
-        let feedback = "Copied summary! | [^N] New Game";
+        self.message = self.wordle_end_message("Copied summary!");
+    }
+
+    /// The message for a finished Wordle game, `copy` saying how to copy (or
+    /// that it was) its summary.
+    fn wordle_end_message(&self, copy: &str) -> Option<(String, Color)> {
+        let word = self.game.secret_word().to_ascii_uppercase();
         match self.game.status() {
-            GameStatus::Won => {
-                self.message = Some((
-                    format!(
-                        "You guessed {} in {}/{}!\n{feedback}",
-                        self.game.secret_word().to_ascii_uppercase(),
-                        self.game.history().len(),
-                        MAX_WORDLE_GUESSES
-                    ),
-                    COLOR_POSITIVE,
-                ));
-            }
-            GameStatus::Lost => {
-                self.message = Some((
-                    format!(
-                        "Out of guesses! Word: {}\n{feedback}",
-                        self.game.secret_word().to_ascii_uppercase()
-                    ),
-                    COLOR_NEGATIVE,
-                ));
-            }
-            _ => {}
+            GameStatus::Won => Some((
+                format!(
+                    "You guessed {word} in {}/{MAX_WORDLE_GUESSES}!\n{copy} | [^N] New Game",
+                    self.game.history().len()
+                ),
+                COLOR_POSITIVE,
+            )),
+            GameStatus::Lost => Some((
+                format!("Out of guesses! Word: {word}\n{copy} | [^N] New Game"),
+                COLOR_NEGATIVE,
+            )),
+            _ => self.message.clone(),
         }
     }
 
@@ -481,18 +633,10 @@ impl TuiApp {
     }
 
     fn handle_mouse_click(&mut self, col: u16, row: u16) {
-        if self.show_help {
-            self.show_help = false;
-            return;
-        }
-
         // Check footer buttons first
-        for (i, &rect) in self.footer_buttons.iter().enumerate() {
-            if rect_contains(rect, col, row) {
-                let action = FOOTER_ACTIONS[i].0;
-                self.execute_footer_action(action);
-                return;
-            }
+        if let Some(action) = self.footer.hit(col, row) {
+            self.execute_footer_action(action);
+            return;
         }
 
         // Check Guess box click
@@ -634,7 +778,7 @@ fn letter_cell_width(inner_width: u16) -> u16 {
     }
 }
 
-pub(crate) fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
+pub fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
@@ -682,12 +826,12 @@ pub(crate) fn wrapped_line_count(text: &str, max_width: u16) -> u16 {
 }
 
 /// RAII guard that ensures the terminal is restored on exit or panic unwinding.
-pub(crate) struct TerminalGuard;
+pub struct TerminalGuard;
 
 /// Switches the terminal to full-screen raw mode for a TUI. It's restored when the
 /// guard drops, and by a panic hook too, so a panic message prints on the normal
 /// screen rather than vanishing with the alternate one.
-pub(crate) fn enter_tui() -> io::Result<(TerminalGuard, Terminal<CrosstermBackend<io::Stdout>>)> {
+pub fn enter_tui() -> io::Result<(TerminalGuard, Terminal<CrosstermBackend<io::Stdout>>)> {
     // Once a process: `arcade` enters a TUI for every game it runs, and wrapping
     // the hook each time would stack a layer per game.
     static PANIC_HOOK: std::sync::Once = std::sync::Once::new();
@@ -740,8 +884,7 @@ pub fn run(game: GameState, autosave: &mut Autosave) -> io::Result<()> {
     if let Some(notice) = autosave.notice.take() {
         app.message = Some((notice.text().to_string(), notice_color(&notice)));
     }
-    let (_guard, mut terminal) = enter_tui()?;
-    run_event_loop(&mut terminal, &mut app, autosave)
+    run_screen(&mut app, autosave)
 }
 
 /// Colour of the status line telling the player about their save.
@@ -752,125 +895,53 @@ pub(crate) fn notice_color(notice: &Notice) -> Color {
     }
 }
 
-fn run_event_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut TuiApp,
-    autosave: &mut Autosave,
-) -> io::Result<()> {
-    loop {
-        terminal.draw(|f| draw_ui(f, app))?;
-        // Every key and click comes back here, so this saves each change.
-        autosave.sync(&app.game.to_saved());
+/// A game's full-screen TUI, as [`run_screen`] runs it.
+pub(crate) trait GameScreen {
+    /// What the game saves, synced after every event.
+    type Saved: serde::Serialize;
+    fn draw(&mut self, f: &mut Frame);
+    fn saved(&self) -> Self::Saved;
+    fn should_quit(&self) -> bool;
+    /// Whether the help page is open, which takes every key and click until
+    /// it's closed.
+    fn show_help(&mut self) -> &mut bool;
+    /// A mouse event while help is closed.
+    fn on_mouse(&mut self, mouse: MouseEvent);
+    /// A key press while help is closed (Ctrl+C has already quit); `Break` quits.
+    fn on_key(&mut self, key: KeyEvent, ctrl: bool) -> ControlFlow<()>;
+}
 
-        if app.should_quit {
+/// Runs `app` full screen until it quits, saving each change.
+pub(crate) fn run_screen(app: &mut impl GameScreen, autosave: &mut Autosave) -> io::Result<()> {
+    let (_guard, mut terminal) = enter_tui()?;
+    loop {
+        terminal.draw(|f| app.draw(f))?;
+        // Every key and click comes back here, so this saves each change.
+        autosave.sync(&app.saved());
+        if app.should_quit() {
             return Ok(());
         }
-
         match crate::input::read()? {
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    app.handle_mouse_click(mouse.column, mouse.row);
+            Event::Mouse(mouse) if *app.show_help() => {
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    *app.show_help() = false;
                 }
-                MouseEventKind::ScrollUp if !app.show_help => {
-                    app.scroll_history_up();
-                }
-                MouseEventKind::ScrollDown if !app.show_help => {
-                    app.scroll_history_down();
-                }
-                _ => {}
-            },
-            Event::Key(key) => {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            }
+            Event::Mouse(mouse) => app.on_mouse(mouse),
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                if ctrl && key.code == KeyCode::Char('c') {
                     return Ok(());
                 }
-
-                if app.show_help {
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') | KeyCode::Char('q') => {
-                            app.show_help = false;
-                        }
-                        _ => {}
+                if *app.show_help() {
+                    if matches!(
+                        key.code,
+                        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') | KeyCode::Char('q')
+                    ) {
+                        *app.show_help() = false;
                     }
-                    continue;
-                }
-
-                match key.code {
-                    KeyCode::Esc => return Ok(()),
-                    KeyCode::Tab | KeyCode::BackTab => {
-                        app.toggle_focus();
-                    }
-                    KeyCode::Char('?') => {
-                        app.show_help = true;
-                    }
-                    KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.start_new_game(None);
-                    }
-                    KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.start_daily_game();
-                    }
-                    KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.trigger_give_up();
-                    }
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.cycle_difficulty();
-                    }
-                    KeyCode::Char('c') | KeyCode::Char('C')
-                        if app.game.mode() == GameMode::Wordle
-                            && matches!(app.game.status(), GameStatus::Won | GameStatus::Lost) =>
-                    {
-                        app.copy_wordle_summary();
-                    }
-                    _ => match app.focus {
-                        FocusPanel::Guess => match key.code {
-                            KeyCode::Enter => {
-                                app.submit_input();
-                            }
-                            KeyCode::Backspace => {
-                                if app.game.status() == GameStatus::Playing {
-                                    app.input.pop();
-                                }
-                            }
-                            KeyCode::Up => {
-                                app.scroll_history_up();
-                            }
-                            KeyCode::Down => {
-                                app.scroll_history_down();
-                            }
-                            KeyCode::Char(c)
-                                if c.is_ascii_alphabetic()
-                                    && app.game.status() == GameStatus::Playing
-                                    && app.input.len() < 12 =>
-                            {
-                                app.input.push(c.to_ascii_lowercase());
-                            }
-                            _ => {}
-                        },
-                        FocusPanel::Scratch => match key.code {
-                            KeyCode::Left => {
-                                app.scratch_cursor = (app.scratch_cursor + 25) % 26;
-                            }
-                            KeyCode::Right => {
-                                app.scratch_cursor = (app.scratch_cursor + 1) % 26;
-                            }
-                            KeyCode::Up | KeyCode::Down => {
-                                app.scratch_cursor = (app.scratch_cursor + 13) % 26;
-                            }
-                            KeyCode::Char(' ') | KeyCode::Enter => {
-                                let ch = (b'a' + app.scratch_cursor as u8) as char;
-                                app.game.toggle_scratch(ch);
-                            }
-                            KeyCode::Char(c) if c.is_ascii_alphabetic() => {
-                                let lower = c.to_ascii_lowercase();
-                                app.scratch_cursor = (lower as u8 - b'a') as usize;
-                                app.game.toggle_scratch(lower);
-                            }
-                            _ => {}
-                        },
-                    },
+                } else if app.on_key(key, ctrl).is_break() {
+                    return Ok(());
                 }
             }
             _ => {}
@@ -878,95 +949,141 @@ fn run_event_loop(
     }
 }
 
+impl GameScreen for TuiApp {
+    type Saved = crate::game::SavedGame;
+
+    fn draw(&mut self, f: &mut Frame) {
+        draw_ui(f, self);
+    }
+
+    fn saved(&self) -> Self::Saved {
+        self.game.to_saved()
+    }
+
+    fn should_quit(&self) -> bool {
+        self.should_quit
+    }
+
+    fn show_help(&mut self) -> &mut bool {
+        &mut self.show_help
+    }
+
+    fn on_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.handle_mouse_click(mouse.column, mouse.row);
+            }
+            MouseEventKind::ScrollUp => {
+                self.scroll_history(false);
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_history(true);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_key(&mut self, key: KeyEvent, ctrl: bool) -> ControlFlow<()> {
+        match key.code {
+            KeyCode::Esc => return ControlFlow::Break(()),
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.toggle_focus();
+            }
+            KeyCode::Char('?') => {
+                self.show_help = true;
+            }
+            KeyCode::Char('n') if ctrl => {
+                self.start_new_game(None);
+            }
+            KeyCode::Char('t') if ctrl => {
+                self.start_daily_game();
+            }
+            KeyCode::Char('g') if ctrl => {
+                self.trigger_give_up();
+            }
+            KeyCode::Char('d') if ctrl => {
+                self.cycle_difficulty();
+            }
+            KeyCode::Char('c') | KeyCode::Char('C')
+                if self.game.mode() == GameMode::Wordle
+                    && matches!(self.game.status(), GameStatus::Won | GameStatus::Lost) =>
+            {
+                self.copy_wordle_summary();
+            }
+            _ => match self.focus {
+                FocusPanel::Guess => match key.code {
+                    KeyCode::Enter => {
+                        self.submit_input();
+                    }
+                    KeyCode::Backspace => {
+                        if self.game.status() == GameStatus::Playing {
+                            self.input.pop();
+                        }
+                    }
+                    KeyCode::Up => {
+                        self.scroll_history(false);
+                    }
+                    KeyCode::Down => {
+                        self.scroll_history(true);
+                    }
+                    KeyCode::Char(c)
+                        if c.is_ascii_alphabetic()
+                            && self.game.status() == GameStatus::Playing
+                            && self.input.len() < 12 =>
+                    {
+                        self.input.push(c.to_ascii_lowercase());
+                    }
+                    _ => {}
+                },
+                FocusPanel::Scratch => match key.code {
+                    KeyCode::Left => {
+                        self.scratch_cursor = (self.scratch_cursor + 25) % 26;
+                    }
+                    KeyCode::Right => {
+                        self.scratch_cursor = (self.scratch_cursor + 1) % 26;
+                    }
+                    KeyCode::Up | KeyCode::Down => {
+                        self.scratch_cursor = (self.scratch_cursor + 13) % 26;
+                    }
+                    KeyCode::Char(' ') | KeyCode::Enter => {
+                        let ch = (b'a' + self.scratch_cursor as u8) as char;
+                        self.game.toggle_scratch(ch);
+                    }
+                    KeyCode::Char(c) if c.is_ascii_alphabetic() => {
+                        let lower = c.to_ascii_lowercase();
+                        self.scratch_cursor = (lower as u8 - b'a') as usize;
+                        self.game.toggle_scratch(lower);
+                    }
+                    _ => {}
+                },
+            },
+        }
+        ControlFlow::Continue(())
+    }
+}
+
 /// Draws a frame, on true black when colours are on (see [`paint_background`]).
 fn draw_ui(f: &mut Frame, app: &mut TuiApp) {
-    draw_screen(f, app);
-    if app.use_color {
-        paint_background(f.buffer_mut());
-    }
+    draw_on_black(f, app.use_color, |f| draw_screen(f, app));
 }
 
 fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
     let mode = app.game.mode();
     let mode_title = format!(" {} ", mode.title());
 
-    if f.area().width < MIN_RECOMMENDED_WIDTH {
+    if draw_too_narrow(f, &mode_title, mode.command_name()) {
         app.guess_area = Rect::default();
         app.scratch_area = Rect::default();
         app.status_area = Rect::default();
-        app.footer_buttons = [Rect::default(); 7];
-
-        let warning_lines = vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "Terminal Width Too Narrow",
-                Style::default()
-                    .fg(COLOR_WARNING)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(format!(
-                "Current width: {} columns (minimum recommended: {} columns).",
-                f.area().width,
-                MIN_RECOMMENDED_WIDTH
-            )),
-            Line::from(format!(
-                "Please widen your terminal window, or run `{} --plain`.",
-                mode.command_name()
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Press [Esc] or [Ctrl+C] to quit.",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ];
-        let warning = Paragraph::new(warning_lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(mode_title)
-                    .border_style(Style::default().fg(COLOR_WARNING)),
-            );
-        f.render_widget(warning, f.area());
+        app.footer.clear();
         return;
     }
 
-    let footer_actions: Vec<(&str, &str)> =
-        FOOTER_ACTIONS.iter().map(|&(_, k, l)| (k, l)).collect();
-    let footer_height = footer_height(f.area().width, &footer_actions);
-
-    // A narrow screen wraps the header onto a second line rather than cut it.
-    let narrow = f.area().width < NARROW_WIDTH;
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(if narrow { 4 } else { 3 }),
-            Constraint::Min(14),
-            Constraint::Length(footer_height),
-        ])
-        .split(f.area());
+    let (chunks, narrow) = screen_areas(f.area(), &app.footer, 14);
 
     // Header
     let pool_count = dict::word_count(mode, app.game.difficulty().scowl_size());
-    let mut header_spans = vec![Span::styled(
-        mode_title,
-        Style::default()
-            .fg(Color::Black)
-            .bg(COLOR_ACCENT)
-            .add_modifier(Modifier::BOLD),
-    )];
-    if let Some(date) = app.game.daily_date() {
-        header_spans.push(Span::raw(" "));
-        header_spans.push(Span::styled(
-            format!(" DAILY {date} UTC "),
-            Style::default()
-                .fg(Color::Black)
-                .bg(COLOR_POSITIVE)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
+    let mut header_spans = header_spans(&mode_title, app.game.daily_date());
     let counter_label = match mode {
         GameMode::Jotto => "  |  Rounds: ",
         GameMode::Wordle => "  |  Guesses: ",
@@ -979,22 +1096,12 @@ fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
         Span::raw("  Difficulty: "),
         Span::styled(
             format!("{} ({} words)", app.game.difficulty(), pool_count),
-            Style::default()
-                .fg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
+            bold(COLOR_ACCENT),
         ),
         Span::raw(counter_label),
-        Span::styled(
-            counter_val,
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(counter_val, bold(Color::White)),
     ]);
-    let header = Paragraph::new(Line::from(header_spans))
-        .wrap(Wrap { trim: true })
-        .block(Block::default().borders(Borders::ALL));
-    f.render_widget(header, chunks[0]);
+    draw_header(f, header_spans, chunks[0]);
 
     // Main split body (Left: Input + Used Letters [+ Scratch] + Status, Right: History / Wordle Board).
     // On a narrow screen the left column's boxes go on top, at their own heights,
@@ -1074,11 +1181,7 @@ fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
         app.input.to_ascii_uppercase(),
         cursor_suffix
     ))
-    .style(
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    )
+    .style(bold(Color::White))
     .block(
         Block::default()
             .borders(Borders::ALL)
@@ -1099,13 +1202,7 @@ fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
             for (i, &is_used) in used.iter().enumerate() {
                 let ch = (b'A' + i as u8) as char;
                 let span = if is_used {
-                    Span::styled(
-                        format!("[{ch}]{used_pad}"),
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(COLOR_ACCENT)
-                            .add_modifier(Modifier::BOLD),
-                    )
+                    Span::styled(format!("[{ch}]{used_pad}"), black_on(COLOR_ACCENT))
                 } else {
                     Span::styled(
                         format!(" {ch} {used_pad}"),
@@ -1130,10 +1227,7 @@ fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
                         } else {
                             format!("+{ch}+{used_pad}")
                         },
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(COLOR_POSITIVE)
-                            .add_modifier(Modifier::BOLD),
+                        black_on(COLOR_POSITIVE),
                     ),
                     Some(LetterState::Present) => Span::styled(
                         if app.use_color {
@@ -1141,10 +1235,7 @@ fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
                         } else {
                             format!("?{ch}?{used_pad}")
                         },
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(COLOR_WARNING)
-                            .add_modifier(Modifier::BOLD),
+                        black_on(COLOR_WARNING),
                     ),
                     Some(LetterState::Absent) => Span::styled(
                         if app.use_color {
@@ -1221,13 +1312,9 @@ fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
                         .bg(COLOR_NEGATIVE)
                         .add_modifier(Modifier::BOLD | Modifier::CROSSED_OUT),
                 ),
-                ScratchState::Positive => (
-                    format!("+{ch}+{scratch_pad}"),
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(COLOR_POSITIVE)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                ScratchState::Positive => {
+                    (format!("+{ch}+{scratch_pad}"), black_on(COLOR_POSITIVE))
+                }
             };
             if is_cursor {
                 style = style.add_modifier(Modifier::UNDERLINED);
@@ -1272,10 +1359,7 @@ fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
         .as_ref()
         .map(|(m, c)| (m.as_str(), *c))
         .unwrap_or(("", Color::White));
-    let status_lines: Vec<Line> = msg_text
-        .lines()
-        .map(|line| Line::from(Span::styled(line, Style::default().fg(msg_color))))
-        .collect();
+    let status_lines = status_lines(msg_text, msg_color);
 
     let show_wordle_summary = mode == GameMode::Wordle
         && matches!(app.game.status(), GameStatus::Won | GameStatus::Lost)
@@ -1305,17 +1389,11 @@ fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
                 let tile = match state {
                     LetterState::Correct => Span::styled(
                         if app.use_color { "   " } else { " + " },
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(COLOR_POSITIVE)
-                            .add_modifier(Modifier::BOLD),
+                        black_on(COLOR_POSITIVE),
                     ),
                     LetterState::Present => Span::styled(
                         if app.use_color { "   " } else { " ? " },
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(COLOR_WARNING)
-                            .add_modifier(Modifier::BOLD),
+                        black_on(COLOR_WARNING),
                     ),
                     LetterState::Absent => Span::styled(
                         if app.use_color { "   " } else { " ~ " },
@@ -1373,20 +1451,14 @@ fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
     // Right Panel: History Table (Jotto) or 6-Guess Board (Wordle)
     match mode {
         GameMode::Jotto => {
-            let header_cells = ["Round", "Guess", "Common"].iter().map(|h| {
-                Cell::from(*h).style(
-                    Style::default()
-                        .fg(COLOR_ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                )
-            });
+            let header_cells = ["Round", "Guess", "Common"]
+                .iter()
+                .map(|h| Cell::from(*h).style(bold(COLOR_ACCENT)));
             let table_header = Row::new(header_cells).height(1).bottom_margin(1);
 
             let rows = app.game.history().iter().rev().map(|r| {
                 let common_style = if r.common == 5 {
-                    Style::default()
-                        .fg(COLOR_POSITIVE)
-                        .add_modifier(Modifier::BOLD)
+                    bold(COLOR_POSITIVE)
                 } else {
                     Style::default().fg(Color::White)
                 };
@@ -1413,13 +1485,9 @@ fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
         }
         GameMode::Wordle => {
             let row_margin = if body_chunks[1].height >= 16 { 1 } else { 0 };
-            let header_cells = ["Guess", "Board"].iter().map(|h| {
-                Cell::from(*h).style(
-                    Style::default()
-                        .fg(COLOR_ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                )
-            });
+            let header_cells = ["Guess", "Board"]
+                .iter()
+                .map(|h| Cell::from(*h).style(bold(COLOR_ACCENT)));
             let table_header = Row::new(header_cells).height(1).bottom_margin(row_margin);
 
             let mut rows = Vec::with_capacity(MAX_WORDLE_GUESSES);
@@ -1443,10 +1511,7 @@ fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
                                 } else {
                                     format!("+{ch}+")
                                 },
-                                Style::default()
-                                    .fg(Color::Black)
-                                    .bg(COLOR_POSITIVE)
-                                    .add_modifier(Modifier::BOLD),
+                                black_on(COLOR_POSITIVE),
                             ),
                             LetterState::Present => Span::styled(
                                 if app.use_color {
@@ -1454,10 +1519,7 @@ fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
                                 } else {
                                     format!("?{ch}?")
                                 },
-                                Style::default()
-                                    .fg(Color::Black)
-                                    .bg(COLOR_WARNING)
-                                    .add_modifier(Modifier::BOLD),
+                                black_on(COLOR_WARNING),
                             ),
                             LetterState::Absent => Span::styled(
                                 if app.use_color {
@@ -1511,11 +1573,7 @@ fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
     }
 
     // Clickable Footer Buttons, in as many rows as the width needs.
-    let button_areas = footer_areas(chunks[2], &footer_actions);
-    for (i, &(_, key_hint, label)) in FOOTER_ACTIONS.iter().enumerate() {
-        app.footer_buttons[i] = button_areas[i];
-        draw_footer_button(f, button_areas[i], key_hint, label);
-    }
+    app.footer.draw(f, chunks[2]);
 
     // Help & Credits Modal
     if app.show_help {
@@ -1527,26 +1585,23 @@ fn draw_screen(f: &mut Frame, app: &mut TuiApp) {
 /// counts, and credits.
 fn draw_help(f: &mut Frame, mode: GameMode, use_color: bool) {
     use crate::game::Difficulty as D;
-    let bullet = |text: &'static str| HelpLine::Bullet(Line::from(text));
     let tile = |plain: &'static str, style: Style, what: &'static str| {
-        HelpLine::Bullet(Line::from(vec![
+        HelpLine::bullet(vec![
             Span::styled(if use_color { " X " } else { plain }, style),
             Span::raw(format!(" {what}")),
-        ]))
-    };
-    let black_on = |bg: Color| {
-        Style::default()
-            .fg(Color::Black)
-            .bg(bg)
-            .add_modifier(Modifier::BOLD)
+        ])
     };
     let (tagline, rules, controls) = match mode {
         GameMode::Jotto => (
             "guess the five-letter word, unlimited guesses",
             vec![
-                bullet("The secret word has 5 different letters and isn't a proper noun."),
-                bullet("Each guess scores how many letters it shares with it, in any spot."),
-                bullet("Mark letters in the scratch pad as you rule them in or out."),
+                HelpLine::bullet(
+                    "The secret word has 5 different letters and isn't a proper noun.",
+                ),
+                HelpLine::bullet(
+                    "Each guess scores how many letters it shares with it, in any spot.",
+                ),
+                HelpLine::bullet("Mark letters in the scratch pad as you rule them in or out."),
             ],
             vec![
                 HelpLine::Keys(vec![
@@ -1560,7 +1615,7 @@ fn draw_help(f: &mut Frame, mode: GameMode, use_color: bool) {
         GameMode::Wordle => (
             "find the five-letter word in six guesses",
             vec![
-                bullet("Letters may repeat; the word isn't a proper noun or a plural."),
+                HelpLine::bullet("Letters may repeat; the word isn't a proper noun or a plural."),
                 tile("+X+", black_on(COLOR_POSITIVE), "in the word, in this spot"),
                 tile(
                     "?X?",
@@ -1611,12 +1666,12 @@ fn draw_help(f: &mut Frame, mode: GameMode, use_color: bool) {
         desc: desc.to_string(),
         note: format!(
             "{} words",
-            crate::contexto::game::grouped(dict::word_count(mode, d.scowl_size()))
+            crate::text::grouped(dict::word_count(mode, d.scowl_size()))
         ),
     })
     .collect();
     let mut credits = vec![
-        HelpLine::Credit("By", "Gus Lipkin (https://guslipkin.me)".to_string()),
+        HelpLine::author(),
         HelpLine::Credit("Words", "SCOWL (http://wordlist.aspell.net/)".to_string()),
     ];
     if mode == GameMode::Wordle {
@@ -1676,16 +1731,9 @@ pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
 
     fn render(app: &mut TuiApp, width: u16, height: u16) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| draw_ui(f, app)).unwrap();
-        let buf = terminal.backend().buffer().clone();
-        (0..height)
-            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
+        screen_text(&render_buffer(width, height, |f| draw_ui(f, app)))
     }
 
     #[test]

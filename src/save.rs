@@ -312,6 +312,27 @@ pub fn parse_enum<E: ValueEnum>(name: &str) -> Option<E> {
     E::from_str(name, true).ok()
 }
 
+/// A save file holding at most one unfinished game, `P` (Flights' saves more).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct SavedGames<P> {
+    pub version: u32,
+    /// The unfinished game, if any.
+    pub game: Option<P>,
+}
+
+/// A saved game's difficulty, by its name.
+pub fn saved_difficulty<E: ValueEnum>(name: &str) -> Result<E, String> {
+    parse_enum(name).ok_or_else(|| format!("unknown difficulty '{name}'"))
+}
+
+/// The variant after `value`, in declaration order and wrapping round: how
+/// difficulties and units cycle.
+pub fn next_variant<E: ValueEnum + PartialEq>(value: &E) -> E {
+    let all = E::value_variants();
+    let i = all.iter().position(|v| v == value).expect("a variant");
+    all[(i + 1) % all.len()].clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

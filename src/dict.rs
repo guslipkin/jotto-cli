@@ -148,7 +148,7 @@ pub fn random_word_excluding(
     let unplayed_count = eligible
         .clone()
         .filter(|chunk| {
-            let w = std::str::from_utf8(&chunk[..5]).expect("valid ASCII");
+            let w = chunk_word(&chunk[..]);
             !excluded.contains(w)
         })
         .count();
@@ -157,12 +157,12 @@ pub fn random_word_excluding(
         let target_idx = fastrand::usize(0..unplayed_count);
         let chunk = eligible
             .filter(|chunk| {
-                let w = std::str::from_utf8(&chunk[..5]).expect("valid ASCII");
+                let w = chunk_word(&chunk[..]);
                 !excluded.contains(w)
             })
             .nth(target_idx)
             .expect("Target unplayed word index out of bounds");
-        let word = std::str::from_utf8(&chunk[..5]).expect("Dictionary contains valid ASCII");
+        let word = chunk_word(chunk);
         (word, false)
     } else {
         let total = word_count(mode, max_difficulty);
@@ -174,7 +174,7 @@ pub fn random_word_excluding(
         let chunk = eligible
             .nth(target_idx)
             .expect("Target word index out of bounds");
-        let word = std::str::from_utf8(&chunk[..5]).expect("Dictionary contains valid ASCII");
+        let word = chunk_word(chunk);
         (word, true)
     }
 }
@@ -297,7 +297,17 @@ fn pack_word_u64(word: &[u8; 5]) -> u64 {
 
 #[inline(always)]
 fn hash_word_bucket(word_key: u64) -> u64 {
-    let mut z = word_key.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    mix64(word_key.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
+/// The word a words.bin record holds.
+fn chunk_word(chunk: &[u8]) -> &str {
+    std::str::from_utf8(&chunk[..5]).expect("Dictionary contains valid ASCII")
+}
+
+/// SplitMix64's finaliser, which spreads every bit of `z` over the result.
+#[inline(always)]
+pub(crate) fn mix64(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
@@ -306,14 +316,12 @@ fn hash_word_bucket(word_key: u64) -> u64 {
 /// Deterministic 64-bit SplitMix64 mixer over `(day, mode_salt, word_key)`.
 #[inline(always)]
 fn hash_day_word(day: u64, mode_salt: u64, word_key: u64) -> u64 {
-    let mut z = day
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add((DAILY_DIFFICULTY_SIZE as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
-        .wrapping_add(mode_salt)
-        ^ word_key.wrapping_mul(0x94D0_49BB_1331_11EB);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
+    mix64(
+        day.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add((DAILY_DIFFICULTY_SIZE as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
+            .wrapping_add(mode_salt)
+            ^ word_key.wrapping_mul(0x94D0_49BB_1331_11EB),
+    )
 }
 
 /// Checks if a string contains no duplicate characters.

@@ -1,22 +1,24 @@
 use std::io;
+use std::ops::ControlFlow;
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
-use ratatui::{Frame, Terminal};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
+use ratatui::Frame;
 
 use crate::contexto::data::lexicon;
-use crate::contexto::game::{bar_filled, grouped, Closeness, ContextoGame, Difficulty, Status};
+use crate::contexto::game::SavedGame;
+use crate::contexto::game::{bar_filled, Closeness, ContextoGame, Difficulty, Status};
 use crate::game::supports_color;
 use crate::help::{draw_help_page, HelpLine, HelpPage, HelpSection};
 use crate::save::Autosave;
+use crate::text::grouped;
 use crate::tui::{
-    draw_footer_button, enter_tui, footer_areas, footer_height, notice_color, rect_contains,
-    COLOR_ACCENT, COLOR_NEGATIVE, COLOR_POSITIVE, COLOR_WARNING, MIN_RECOMMENDED_WIDTH,
-    NARROW_WIDTH,
+    bold, draw_header, draw_on_black, draw_status, draw_too_narrow, header_spans, notice_color,
+    run_screen, screen_areas, step_selection, Footer, GameScreen, COLOR_ACCENT, COLOR_NEGATIVE,
+    COLOR_POSITIVE, COLOR_WARNING,
 };
 
 /// Background of the highlighted row in the guess list. A gray background rather
@@ -57,7 +59,7 @@ struct ContextoApp {
     game: ContextoGame,
     use_color: bool,
     input: String,
-    footer_buttons: [Rect; FOOTER_COUNT],
+    footer: Footer<FooterAction>,
     message: (String, Color),
     /// Number of the most recent guess or hint, highlighted in the list.
     latest: Option<usize>,
@@ -83,7 +85,7 @@ impl ContextoApp {
             game,
             use_color: supports_color(),
             input: String::new(),
-            footer_buttons: [Rect::default(); FOOTER_COUNT],
+            footer: Footer::new(&FOOTER_ACTIONS),
             message,
             latest: None,
             show_help: false,
@@ -205,19 +207,8 @@ impl ContextoApp {
         );
     }
 
-    fn scroll_up(&mut self) {
-        if !self.game.guesses().is_empty() {
-            let i = self.table_state.selected().unwrap_or(0);
-            self.table_state.select(Some(i.saturating_sub(1)));
-        }
-    }
-
-    fn scroll_down(&mut self) {
-        let len = self.game.guesses().len();
-        if len > 0 {
-            let i = self.table_state.selected().unwrap_or(0);
-            self.table_state.select(Some((i + 1).min(len - 1)));
-        }
+    fn scroll(&mut self, down: bool) {
+        step_selection(&mut self.table_state, self.game.guesses().len(), down);
     }
 
     fn execute_footer_action(&mut self, action: FooterAction) {
@@ -234,16 +225,8 @@ impl ContextoApp {
     }
 
     fn handle_mouse_click(&mut self, col: u16, row: u16) {
-        if self.show_help {
-            self.show_help = false;
-            return;
-        }
-        if let Some(i) = self
-            .footer_buttons
-            .iter()
-            .position(|&r| rect_contains(r, col, row))
-        {
-            self.execute_footer_action(FOOTER_ACTIONS[i].0);
+        if let Some(action) = self.footer.hit(col, row) {
+            self.execute_footer_action(action);
         }
     }
 }
@@ -282,191 +265,103 @@ pub fn run(game: ContextoGame, autosave: &mut Autosave) -> io::Result<()> {
         }
         app.message = (notice.text().to_string(), notice_color(&notice));
     }
-    let (_guard, mut terminal) = enter_tui()?;
-    run_event_loop(&mut terminal, &mut app, autosave)
+    run_screen(&mut app, autosave)
 }
 
-fn run_event_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut ContextoApp,
-    autosave: &mut Autosave,
-) -> io::Result<()> {
-    loop {
-        terminal.draw(|f| draw_ui(f, app))?;
-        // Every key and click comes back here, so this saves each change.
-        autosave.sync(&app.game.to_saved());
-        if app.should_quit {
-            return Ok(());
-        }
+impl GameScreen for ContextoApp {
+    type Saved = SavedGame;
 
-        match crate::input::read()? {
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    app.handle_mouse_click(mouse.column, mouse.row)
-                }
-                MouseEventKind::ScrollUp if !app.show_help => app.scroll_up(),
-                MouseEventKind::ScrollDown if !app.show_help => app.scroll_down(),
-                _ => {}
-            },
-            Event::Key(key) => {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                if ctrl && key.code == KeyCode::Char('c') {
-                    return Ok(());
-                }
-                if app.show_help {
-                    if matches!(
-                        key.code,
-                        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') | KeyCode::Char('q')
-                    ) {
-                        app.show_help = false;
-                    }
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Esc => return Ok(()),
-                    KeyCode::Char('?') => app.show_help = true,
-                    KeyCode::Tab => app.take_hint(),
-                    KeyCode::Char('n') if ctrl => app.start_new_game(None),
-                    KeyCode::Char('d') if ctrl => app.cycle_difficulty(),
-                    KeyCode::Char('t') if ctrl => app.start_daily_game(),
-                    KeyCode::Char('g') if ctrl => app.trigger_give_up(),
-                    KeyCode::Enter => app.submit_input(),
-                    KeyCode::Backspace => {
-                        app.input.pop();
-                    }
-                    KeyCode::Up => app.scroll_up(),
-                    KeyCode::Down => app.scroll_down(),
-                    KeyCode::Char(c)
-                        if c.is_ascii_alphabetic()
-                            && !ctrl
-                            && app.game.status() == Status::Playing
-                            && app.input.len() < MAX_INPUT_LEN =>
-                    {
-                        app.input.push(c.to_ascii_lowercase());
-                    }
-                    _ => {}
-                }
+    fn draw(&mut self, f: &mut Frame) {
+        draw_ui(f, self);
+    }
+
+    fn saved(&self) -> Self::Saved {
+        self.game.to_saved()
+    }
+
+    fn should_quit(&self) -> bool {
+        self.should_quit
+    }
+
+    fn show_help(&mut self) -> &mut bool {
+        &mut self.show_help
+    }
+
+    fn on_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.handle_mouse_click(mouse.column, mouse.row)
+            }
+            MouseEventKind::ScrollUp => self.scroll(false),
+            MouseEventKind::ScrollDown => self.scroll(true),
+            _ => {}
+        }
+    }
+
+    fn on_key(&mut self, key: KeyEvent, ctrl: bool) -> ControlFlow<()> {
+        match key.code {
+            KeyCode::Esc => return ControlFlow::Break(()),
+            KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Tab => self.take_hint(),
+            KeyCode::Char('n') if ctrl => self.start_new_game(None),
+            KeyCode::Char('d') if ctrl => self.cycle_difficulty(),
+            KeyCode::Char('t') if ctrl => self.start_daily_game(),
+            KeyCode::Char('g') if ctrl => self.trigger_give_up(),
+            KeyCode::Enter => self.submit_input(),
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            KeyCode::Up => self.scroll(false),
+            KeyCode::Down => self.scroll(true),
+            KeyCode::Char(c)
+                if c.is_ascii_alphabetic()
+                    && !ctrl
+                    && self.game.status() == Status::Playing
+                    && self.input.len() < MAX_INPUT_LEN =>
+            {
+                self.input.push(c.to_ascii_lowercase());
             }
             _ => {}
         }
+        ControlFlow::Continue(())
     }
 }
 
 /// Draws a frame, on true black when colours are on (see
 /// [`crate::tui::paint_background`]).
 fn draw_ui(f: &mut Frame, app: &mut ContextoApp) {
-    draw_screen(f, app);
-    if app.use_color {
-        crate::tui::paint_background(f.buffer_mut());
-    }
+    draw_on_black(f, app.use_color, |f| draw_screen(f, app));
 }
 
 fn draw_screen(f: &mut Frame, app: &mut ContextoApp) {
     let title = " CONTEXTO ";
 
-    if f.area().width < MIN_RECOMMENDED_WIDTH {
-        app.footer_buttons = [Rect::default(); FOOTER_COUNT];
-        let warning = Paragraph::new(vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "Terminal Width Too Narrow",
-                Style::default()
-                    .fg(COLOR_WARNING)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(format!(
-                "Current width: {} columns (minimum recommended: {MIN_RECOMMENDED_WIDTH} columns).",
-                f.area().width
-            )),
-            Line::from("Please widen your terminal window, or run `contexto --plain`."),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Press [Esc] or [Ctrl+C] to quit.",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ])
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(Style::default().fg(COLOR_WARNING)),
-        );
-        f.render_widget(warning, f.area());
+    if draw_too_narrow(f, title, "contexto") {
+        app.footer.clear();
         return;
     }
 
     // The footer's buttons take as many rows as their labels need; a narrow
-    // screen stacks the panels and wraps the header.
-    let footer_actions: Vec<(&str, &str)> =
-        FOOTER_ACTIONS.iter().map(|&(_, k, l)| (k, l)).collect();
-    let footer_height = footer_height(f.area().width, &footer_actions);
-    let narrow = f.area().width < NARROW_WIDTH;
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(if narrow { 4 } else { 3 }),
-            Constraint::Min(12),
-            Constraint::Length(footer_height),
-        ])
-        .split(f.area());
+    // screen stacks the panels.
+    let (chunks, narrow) = screen_areas(f.area(), &app.footer, 12);
 
     // Header
-    let mut header_spans = vec![Span::styled(
-        title,
-        Style::default()
-            .fg(Color::Black)
-            .bg(COLOR_ACCENT)
-            .add_modifier(Modifier::BOLD),
-    )];
-    if let Some(date) = app.game.daily_date() {
-        header_spans.push(Span::raw(" "));
-        header_spans.push(Span::styled(
-            format!(" DAILY {date} UTC "),
-            Style::default()
-                .fg(Color::Black)
-                .bg(COLOR_POSITIVE)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    let bold_white = Style::default()
-        .fg(Color::White)
-        .add_modifier(Modifier::BOLD);
+    let mut header_spans = header_spans(title, app.game.daily_date());
+    let bold_white = bold(Color::White);
     header_spans.extend([
         Span::raw("  Difficulty: "),
-        Span::styled(
-            app.game.difficulty().label(),
-            Style::default()
-                .fg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(app.game.difficulty().label(), bold(COLOR_ACCENT)),
         Span::raw("  |  Guesses: "),
         Span::styled(app.game.guess_count().to_string(), bold_white),
         Span::raw("  |  Hints: "),
         Span::styled(app.game.hint_count().to_string(), bold_white),
         Span::raw("  |  Best: "),
         match app.game.best_rank() {
-            Some(r) => Span::styled(
-                format!("#{r}"),
-                Style::default()
-                    .fg(closeness_color(r))
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Some(r) => Span::styled(format!("#{r}"), bold(closeness_color(r))),
             None => Span::styled("-", bold_white),
         },
     ]);
-    f.render_widget(
-        Paragraph::new(Line::from(header_spans))
-            .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL)),
-        chunks[0],
-    );
+    draw_header(f, header_spans, chunks[0]);
 
     // The guess, latest and status boxes beside the list, or above it when narrow.
     let body = if narrow {
@@ -524,12 +419,7 @@ fn draw_screen(f: &mut Frame, app: &mut ContextoApp) {
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![
-                    Span::styled(
-                        format!("{rank_text:<8}"),
-                        Style::default()
-                            .fg(closeness_color(g.rank))
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled(format!("{rank_text:<8}"), bold(closeness_color(g.rank))),
                     Span::styled(g.label(), bold_white),
                 ]),
                 Line::from(bar_spans(g.rank, latest_inner.width, app.use_color)),
@@ -547,17 +437,8 @@ fn draw_screen(f: &mut Frame, app: &mut ContextoApp) {
     }
 
     // Status
-    let (msg, msg_color) = &app.message;
-    f.render_widget(
-        Paragraph::new(
-            msg.lines()
-                .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(*msg_color))))
-                .collect::<Vec<_>>(),
-        )
-        .wrap(Wrap { trim: true })
-        .block(Block::default().borders(Borders::ALL).title(" Status ")),
-        left[2],
-    );
+    let (msg, color) = &app.message;
+    draw_status(f, left[2], msg, *color);
 
     // Closest-first list of every guess and hint
     let list_inner_w = body[1].width.saturating_sub(2);
@@ -585,14 +466,9 @@ fn draw_screen(f: &mut Frame, app: &mut ContextoApp) {
             ])
         })
         .collect();
-    let header = Row::new(["Rank", "Word", "Closeness"].map(|h| {
-        Cell::from(h).style(
-            Style::default()
-                .fg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        )
-    }))
-    .bottom_margin(1);
+    let header =
+        Row::new(["Rank", "Word", "Closeness"].map(|h| Cell::from(h).style(bold(COLOR_ACCENT))))
+            .bottom_margin(1);
     let table = Table::new(
         rows,
         [
@@ -616,11 +492,7 @@ fn draw_screen(f: &mut Frame, app: &mut ContextoApp) {
     f.render_stateful_widget(table, body[1], &mut app.table_state);
 
     // Clickable footer buttons, in as many rows as the width needs.
-    let button_areas = footer_areas(chunks[2], &footer_actions);
-    for (i, &(_, key_hint, label)) in FOOTER_ACTIONS.iter().enumerate() {
-        app.footer_buttons[i] = button_areas[i];
-        draw_footer_button(f, button_areas[i], key_hint, label);
-    }
+    app.footer.draw(f, chunks[2]);
 
     if app.show_help {
         draw_help(f, app.use_color);
@@ -651,16 +523,12 @@ fn draw_help(f: &mut Frame, use_color: bool) {
                         grouped(lex.guessable_count()),
                         grouped(lex.ranked_count())
                     ))),
-                    HelpLine::Bullet(Line::from(
+                    HelpLine::bullet(
                         "Plurals and other forms count as their base ('mice' is 'mouse').",
-                    )),
-                    HelpLine::Bullet(Line::from(
-                        "Closeness comes from usage, so a shared topic counts too.",
-                    )),
-                    HelpLine::Bullet(Line::from(closeness)),
-                    HelpLine::Bullet(Line::from(
-                        "A hint shows the word at half your best guess's rank.",
-                    )),
+                    ),
+                    HelpLine::bullet("Closeness comes from usage, so a shared topic counts too."),
+                    HelpLine::bullet(closeness),
+                    HelpLine::bullet("A hint shows the word at half your best guess's rank."),
                 ],
             },
             HelpSection {
@@ -694,7 +562,7 @@ fn draw_help(f: &mut Frame, use_color: bool) {
             HelpSection {
                 title: "Credits",
                 lines: vec![
-                    HelpLine::Credit("By", "Gus Lipkin (https://guslipkin.me)".to_string()),
+                    HelpLine::author(),
                     HelpLine::Credit("Inspired by", "Contexto: https://contexto.me/".to_string()),
                     HelpLine::Credit(
                         "Data",
@@ -710,16 +578,10 @@ fn draw_help(f: &mut Frame, use_color: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
+    use crate::tui::{render_buffer, screen_text};
 
     fn render(app: &mut ContextoApp, width: u16, height: u16) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| draw_ui(f, app)).unwrap();
-        let buf = terminal.backend().buffer().clone();
-        (0..height)
-            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
+        screen_text(&render_buffer(width, height, |f| draw_ui(f, app)))
     }
 
     fn app_with_guesses(word: &str, guesses: &[&str]) -> ContextoApp {
@@ -770,9 +632,7 @@ mod tests {
     fn highlighted_row_is_gray_through_the_bar() {
         let mut app = app_with_guesses("dog", &["cat", "violin"]);
         app.use_color = true;
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        terminal.draw(|f| draw_ui(f, &mut app)).unwrap();
-        let buf = terminal.backend().buffer().clone();
+        let buf = render_buffer(100, 30, |f| draw_ui(f, &mut app));
         let row_of = |word: &str| {
             (0..30u16)
                 .find(|&y| {
@@ -815,9 +675,7 @@ mod tests {
             let mut app = app_with_guesses("dog", &["cat"]);
             app.use_color = use_color;
             app.show_help = help;
-            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-            terminal.draw(|f| draw_ui(f, &mut app)).unwrap();
-            let buf = terminal.backend().buffer().clone();
+            let buf = render_buffer(100, 30, |f| draw_ui(f, &mut app));
             let unset = buf
                 .content()
                 .iter()
@@ -876,7 +734,7 @@ mod tests {
         let screen = render(&mut app, 80, 24);
         assert!(screen.contains("You found DOG in 1 guess"));
         // Clicking New Game (footer button 4) starts a fresh game.
-        let btn = app.footer_buttons[3];
+        let btn = app.footer.buttons[3];
         app.handle_mouse_click(btn.x + 1, btn.y + 1);
         assert_eq!(app.game.status(), Status::Playing);
         assert!(app.game.guesses().is_empty());

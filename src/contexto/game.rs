@@ -9,6 +9,7 @@ use crate::contexto::data::{lexicon, Ranking};
 use crate::dict;
 use crate::game::sanitize_input;
 use crate::save::{self, enum_name, parse_enum, Loaded, Notice, Saveable, SAVE_VERSION};
+use crate::text::{plural, GAME_OVER};
 
 /// How abstract the secret word may be. Each level's pool includes the easier ones'.
 /// Tiers come from WordNet's category for the word's most common sense
@@ -55,13 +56,9 @@ impl Difficulty {
         }
     }
 
-    /// Cycles to the next difficulty level.
-    pub const fn next(self) -> Self {
-        match self {
-            Self::Easy => Self::Medium,
-            Self::Medium => Self::Hard,
-            Self::Hard => Self::Easy,
-        }
+    /// Cycles to the next one, in declaration order.
+    pub fn next(self) -> Self {
+        save::next_variant(&self)
     }
 
     /// Number of secret words at this level.
@@ -70,38 +67,17 @@ impl Difficulty {
     }
 }
 
-impl fmt::Display for Difficulty {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
+display_label!(Difficulty);
 
 impl FromStr for Difficulty {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "easy" | "e" => Ok(Self::Easy),
-            "medium" | "med" | "m" => Ok(Self::Medium),
-            "hard" | "h" => Ok(Self::Hard),
-            other => Err(format!(
-                "Unknown difficulty '{other}'. Choose: easy, medium or hard."
-            )),
-        }
+        // The same names and aliases the command line takes.
+        let s = s.trim().to_ascii_lowercase();
+        parse_enum(&s)
+            .ok_or_else(|| format!("Unknown difficulty '{s}'. Choose: easy, medium or hard."))
     }
-}
-
-/// Formats a count with thousands separators ("23,191").
-pub fn grouped(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// Daily games always use this level, so everyone gets the same word.
@@ -147,11 +123,6 @@ pub fn bar_filled(rank: usize, width: usize) -> usize {
     ((bar_fraction(rank) * width as f64).round() as usize).min(width)
 }
 
-/// "1 guess", "3 guesses" and so on.
-fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
-}
-
 /// Errors returned when a guess can't be scored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuessError {
@@ -164,9 +135,7 @@ pub enum GuessError {
 impl fmt::Display for GuessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::GameOver => {
-                f.write_str("The current game is already over. Start a new game to play again.")
-            }
+            Self::GameOver => f.write_str(GAME_OVER),
             Self::Empty => f.write_str("Type a word to guess."),
             Self::NonAlphabetic => f.write_str("Guesses must contain only letters a-z."),
             Self::UnknownWord(w) => write!(
@@ -197,7 +166,7 @@ impl fmt::Display for HintError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::GameOver => {
-                f.write_str("The current game is already over. Start a new game to play again.")
+                f.write_str(GAME_OVER)
             }
             Self::NoneCloser => f.write_str(
                 "No hint left: your best guess is #2, so the only closer word is the answer.",
@@ -280,12 +249,7 @@ pub enum Status {
 }
 
 /// A `contexto` save file (see [`crate::save`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SavedGame {
-    pub version: u32,
-    /// The unfinished game, if any.
-    pub game: Option<SavedPlay>,
-}
+pub type SavedGame = save::SavedGames<SavedPlay>;
 
 /// An unfinished `contexto` game, replayed on load. Ranks aren't saved: replaying
 /// recomputes them, so a save stays right if the word data changes.
@@ -599,8 +563,7 @@ impl ContextoGame {
         let Some(play) = &saved.game else {
             return Ok(None);
         };
-        let difficulty = parse_enum(&play.difficulty)
-            .ok_or_else(|| format!("unknown difficulty '{}'", play.difficulty))?;
+        let difficulty = save::saved_difficulty(&play.difficulty)?;
         let mut game = Self::new(difficulty, Some(&play.secret))
             .map_err(|_| format!("its word '{}' is no longer in the word list", play.secret))?;
         game.daily_date = play.daily_date.clone();

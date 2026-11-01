@@ -31,8 +31,13 @@ P\t1\t3\t2
 P\t2\t3\t2
 ";
 
+/// `text` parsed into a network that lives as long as a game needs.
+fn leaked(text: &str, max_connections: usize) -> &'static Network {
+    Box::leak(Box::new(Network::parse(text, max_connections).unwrap()))
+}
+
 fn fixture_with(max_connections: usize) -> &'static Network {
-    Box::leak(Box::new(Network::parse(FIXTURE, max_connections).unwrap()))
+    leaked(FIXTURE, max_connections)
 }
 
 fn fixture() -> &'static Network {
@@ -44,12 +49,17 @@ fn idx(net: &Network, code: &str) -> usize {
 }
 
 fn game_at(net: &'static Network, difficulty: Difficulty) -> FlightsGame {
+    game_with(net, difficulty, Rules::default())
+}
+
+/// A game from AAA to BBB on `net`.
+fn game_with(net: &'static Network, difficulty: Difficulty, rules: Rules) -> FlightsGame {
     FlightsGame::with_puzzle(
         net,
         idx(net, "AAA"),
         idx(net, "BBB"),
         difficulty,
-        Rules::default(),
+        rules,
         Units::Nm,
         None,
     )
@@ -149,7 +159,7 @@ fn puzzles_need_three_letters_and_two_routes() {
     assert_eq!(net.best_hops(s, e), Some(3));
     // A network with no puzzle says so rather than looping or panicking.
     let line = "A\tAAA\t0\t0\nA\tAAB\t0\t1\nH\tAAA\tAAB\t-\t-\t-\n";
-    let line: &'static Network = Box::leak(Box::new(Network::parse(line, 1).unwrap()));
+    let line = leaked(line, 1);
     assert_eq!(line.random_puzzle(&mut rng, None), None);
     assert!(matches!(
         FlightsGame::random(Difficulty::Custom, Rules::default(), Units::Nm, Some(line)),
@@ -649,17 +659,11 @@ fn once_rules(reuse_connections: bool) -> Rules {
 }
 
 fn once_game(reuse_connections: bool) -> FlightsGame {
-    let net: &'static Network = Box::leak(Box::new(Network::parse(ONCE_FIXTURE, 1).unwrap()));
-    FlightsGame::with_puzzle(
-        net,
-        idx(net, "AAA"),
-        idx(net, "BBB"),
+    game_with(
+        leaked(ONCE_FIXTURE, 1),
         Difficulty::Custom,
         once_rules(reuse_connections),
-        Units::Nm,
-        None,
     )
-    .unwrap()
 }
 
 fn via(g: &FlightsGame, leg: usize) -> Vec<&str> {

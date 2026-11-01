@@ -4,8 +4,6 @@
 //! It shares the crate's save, date and terminal helpers but has its own engine and
 //! TUI, since its moves are flights on a map rather than words.
 
-use std::process;
-
 use clap::Parser;
 
 pub mod coast;
@@ -14,7 +12,6 @@ pub mod game;
 pub mod plain;
 pub mod tui;
 
-use crate::save::{self, Autosave};
 use game::{Difficulty, FlightsGame, Units};
 
 /// Fly from one airport to another, changing one letter of the code per flight,
@@ -51,7 +48,7 @@ pub struct FlightsArgs {
 pub fn play() -> Result<(), String> {
     crate::play_saved(
         "flights",
-        |loaded| FlightsGame::start(None, false, None, None, loaded).map_err(|e| e.to_string()),
+        |loaded| FlightsGame::start(None, false, None, None, loaded),
         tui::run,
     )
 }
@@ -59,25 +56,21 @@ pub fn play() -> Result<(), String> {
 /// CLI entrypoint for the `flights` binary.
 pub fn run_cli() {
     let args = FlightsArgs::parse();
-    let path = save::save_path("flights");
-    let loaded = path.as_deref().map_or(save::Loaded::Missing, save::load);
-
-    let (game, notice) = match FlightsGame::start(
-        args.difficulty,
-        args.daily,
-        args.route.as_deref(),
-        args.units,
-        loaded,
-    ) {
-        Ok(started) => started,
-        Err(err) => {
-            // Either --route, or custom settings (from the save) that fit no puzzle.
-            eprintln!("Error starting a game: {err}");
-            process::exit(1);
-        }
-    };
-
-    let mut autosave = Autosave::new(path);
-    autosave.notice = notice;
-    crate::run_frontend(game, autosave, args.plain, plain::run, tui::run);
+    crate::run_command(
+        "flights",
+        // Either --route, or custom settings (from the save) that fit no puzzle.
+        "Error starting a game",
+        |loaded| {
+            FlightsGame::start(
+                args.difficulty,
+                args.daily,
+                args.route.as_deref(),
+                args.units,
+                loaded,
+            )
+        },
+        args.plain,
+        plain::run,
+        tui::run,
+    );
 }

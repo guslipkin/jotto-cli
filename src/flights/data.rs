@@ -124,9 +124,7 @@ pub fn network(max_connections: usize) -> &'static Network {
 fn data() -> &'static str {
     static TEXT: OnceLock<String> = OnceLock::new();
     TEXT.get_or_init(|| {
-        let bytes = miniz_oxide::inflate::decompress_to_vec(DATA)
-            .expect("build.rs deflated data/flights.tsv");
-        String::from_utf8(bytes).expect("data/flights.tsv is UTF-8")
+        String::from_utf8(crate::inflate(DATA, "flights.tsv")).expect("data/flights.tsv is UTF-8")
     })
 }
 
@@ -363,33 +361,44 @@ impl Network {
             .map(|pos| &self.adj[a][pos])
     }
 
-    /// The shortest route from `start` to `end` by total distance (Dijkstra), as its
-    /// length in nautical miles and its airports, `start` and `end` included.
-    pub fn shortest(&self, start: usize, end: usize) -> Option<(f64, Vec<usize>)> {
+    /// Shortest distances from `source` to every airport (Dijkstra; hops are the
+    /// same both ways, so to it too), infinite where there's no route. Airports
+    /// settle nearest first, and the search stops once `stop` has. `improved(from,
+    /// to)` hears of each shorter route found to `to`, by way of `from`.
+    fn dijkstra(
+        &self,
+        source: usize,
+        stop: Option<usize>,
+        mut improved: impl FnMut(usize, usize),
+    ) -> Vec<f64> {
         let mut dist = vec![f64::INFINITY; self.len()];
-        let mut prev = vec![usize::MAX; self.len()];
         let mut heap = BinaryHeap::new();
-        dist[start] = 0.0;
-        heap.push(Entry(0.0, start));
+        dist[source] = 0.0;
+        heap.push(Entry(0.0, source));
         while let Some(Entry(d, node)) = heap.pop() {
-            if node == end {
+            if Some(node) == stop {
                 break;
             }
             if d > dist[node] {
                 continue;
             }
-            for &Hop {
-                to: next, distance, ..
-            } in &self.adj[node]
-            {
-                let nd = d + distance;
-                if nd < dist[next] {
-                    dist[next] = nd;
-                    prev[next] = node;
-                    heap.push(Entry(nd, next));
+            for hop in &self.adj[node] {
+                let nd = d + hop.distance;
+                if nd < dist[hop.to] {
+                    dist[hop.to] = nd;
+                    improved(node, hop.to);
+                    heap.push(Entry(nd, hop.to));
                 }
             }
         }
+        dist
+    }
+
+    /// The shortest route from `start` to `end` by total distance, as its length
+    /// in nautical miles and its airports, `start` and `end` included.
+    pub fn shortest(&self, start: usize, end: usize) -> Option<(f64, Vec<usize>)> {
+        let mut prev = vec![usize::MAX; self.len()];
+        let dist = self.dijkstra(start, Some(end), |from, to| prev[to] = from);
         if !dist[end].is_finite() {
             return None;
         }
@@ -399,28 +408,6 @@ impl Network {
         }
         path.reverse();
         Some((dist[end], path))
-    }
-
-    /// Shortest distances from every airport to `end` (hops are the same both
-    /// ways), by Dijkstra.
-    fn distances_to(&self, end: usize) -> Vec<f64> {
-        let mut dist = vec![f64::INFINITY; self.len()];
-        let mut heap = BinaryHeap::new();
-        dist[end] = 0.0;
-        heap.push(Entry(0.0, end));
-        while let Some(Entry(d, node)) = heap.pop() {
-            if d > dist[node] {
-                continue;
-            }
-            for hop in &self.adj[node] {
-                let nd = d + hop.distance;
-                if nd < dist[hop.to] {
-                    dist[hop.to] = nd;
-                    heap.push(Entry(nd, hop.to));
-                }
-            }
-        }
-        dist
     }
 
     /// The `want` shortest routes from `start` to `end`, shortest first, when
@@ -435,7 +422,7 @@ impl Network {
     /// come off the queue shortest first, so the first to reach `end` is the
     /// shortest and the next the runner-up.
     pub fn routes_once(&self, start: usize, end: usize, want: usize) -> Vec<OnceRoute> {
-        let to_end = self.distances_to(end);
+        let to_end = self.dijkstra(end, None, |_, _| {});
         if !to_end[start].is_finite() {
             return Vec::new();
         }
@@ -462,7 +449,7 @@ impl Network {
             }
         };
         while let Some(Entry(_, r)) = heap.pop() {
-            let (at, _, _, so_far) = routes[r].clone();
+            let (at, _, _, so_far) = routes[r];
             if at == end {
                 let mut stops = Vec::new();
                 let mut legs = Vec::new();
@@ -526,36 +513,16 @@ impl Network {
     /// crossed a non-bridge hop, as `scripts/build-flights-data.py` counts them.
     pub fn puzzle_ends(&self, start: usize, max_hops: Option<usize>) -> Vec<usize> {
         let n = self.len();
-        let mut dist = vec![f64::INFINITY; n];
         let mut hops = vec![0usize; n];
         let mut two = vec![false; n];
-        let mut done = vec![false; n];
-        let mut heap = BinaryHeap::new();
-        dist[start] = 0.0;
-        heap.push(Entry(0.0, start));
-        while let Some(Entry(d, node)) = heap.pop() {
-            if done[node] {
-                continue;
-            }
-            done[node] = true;
-            for &Hop {
-                to: next, distance, ..
-            } in &self.adj[node]
-            {
-                let nd = d + distance;
-                if nd < dist[next] {
-                    dist[next] = nd;
-                    hops[next] = hops[node] + 1;
-                    two[next] =
-                        two[node] || !self.bridges.contains(&(node.min(next), node.max(next)));
-                    heap.push(Entry(nd, next));
-                }
-            }
-        }
+        let dist = self.dijkstra(start, None, |from, to| {
+            hops[to] = hops[from] + 1;
+            two[to] = two[from] || !self.bridges.contains(&(from.min(to), from.max(to)));
+        });
         let code = self.code(start);
         (0..n)
             .filter(|&end| {
-                done[end]
+                dist[end].is_finite()
                     && two[end]
                     && letters_apart(code, self.code(end)) == 3
                     && max_hops.is_none_or(|max| hops[end] <= max)

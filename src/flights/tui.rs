@@ -1,20 +1,20 @@
 use std::cell::Cell as StdCell;
 use std::io;
+use std::ops::ControlFlow;
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Points};
 use ratatui::widgets::{
     Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Widget, Wrap,
 };
-use ratatui::{Frame, Terminal};
+use ratatui::Frame;
 
-use crate::contexto::game::grouped;
 use crate::flights::coast::{self, clip, Bounds, Coast};
 use crate::flights::data::{Ticket, MAX_CONNECTIONS};
+use crate::flights::game::SavedGame;
 use crate::flights::game::{
     code_str, parse_code, Code, Difficulty, FlightOption, FlightsGame, FlyOutcome, Rules, Status,
     Units, MAX_HOPS, MIN_HOPS,
@@ -22,10 +22,11 @@ use crate::flights::game::{
 use crate::game::supports_color;
 use crate::help::{draw_help_page, HelpLine, HelpPage, HelpSection};
 use crate::save::Autosave;
+use crate::text::grouped;
 use crate::tui::{
-    centered_rect, draw_footer_button, enter_tui, footer_areas, footer_height, notice_color,
-    rect_contains, wrapped_line_count, COLOR_ACCENT, COLOR_POSITIVE, COLOR_WARNING,
-    MIN_RECOMMENDED_WIDTH, NARROW_WIDTH,
+    black_on, bold, centered_rect, draw_on_black, draw_too_narrow, header_spans, notice_color,
+    rect_contains, run_screen, screen_areas, step_selection, wrapped_line_count, Footer,
+    GameScreen, COLOR_ACCENT, COLOR_POSITIVE, COLOR_WARNING,
 };
 
 /// The destination's colour: Okabe-Ito reddish purple, apart from the palette's
@@ -136,7 +137,7 @@ const FOOTER_ACTIONS: [(FooterAction, &str, &str); FOOTER_COUNT] = [
 struct FlightsApp {
     game: FlightsGame,
     use_color: bool,
-    footer_buttons: [Rect; FOOTER_COUNT],
+    footer: Footer<FooterAction>,
     /// Inside of the options list, for mapping clicks to rows.
     options_area: Rect,
     message: (String, Color),
@@ -370,7 +371,7 @@ impl FlightsApp {
         let mut app = Self {
             game,
             use_color: supports_color(),
-            footer_buttons: [Rect::default(); FOOTER_COUNT],
+            footer: Footer::new(&FOOTER_ACTIONS),
             options_area: Rect::default(),
             message,
             show_help: false,
@@ -593,17 +594,7 @@ impl FlightsApp {
     }
 
     fn move_selection(&mut self, down: bool) {
-        let len = self.game.options().len();
-        if len == 0 {
-            return;
-        }
-        let i = self.options_state.selected().unwrap_or(0);
-        let next = if down {
-            (i + 1).min(len - 1)
-        } else {
-            i.saturating_sub(1)
-        };
-        self.options_state.select(Some(next));
+        step_selection(&mut self.options_state, self.game.options().len(), down);
     }
 
     fn execute_footer_action(&mut self, action: FooterAction) {
@@ -715,10 +706,6 @@ impl FlightsApp {
     }
 
     fn handle_mouse_click(&mut self, col: u16, row: u16) {
-        if self.show_help {
-            self.show_help = false;
-            return;
-        }
         if let Some(page) = &mut self.settings {
             // The reset row is a button; anywhere else closes the page.
             if rect_contains(page.reset_area.get(), col, row) {
@@ -729,12 +716,8 @@ impl FlightsApp {
             }
             return;
         }
-        if let Some(i) = self
-            .footer_buttons
-            .iter()
-            .position(|&r| rect_contains(r, col, row))
-        {
-            self.execute_footer_action(FOOTER_ACTIONS[i].0);
+        if let Some(action) = self.footer.hit(col, row) {
+            self.execute_footer_action(action);
             return;
         }
         if rect_contains(self.options_area, col, row) {
@@ -785,186 +768,129 @@ pub fn run(game: FlightsGame, autosave: &mut Autosave) -> io::Result<()> {
     if let Some(notice) = autosave.notice.take() {
         app.message = (notice.text().to_string(), notice_color(&notice));
     }
-    let (_guard, mut terminal) = enter_tui()?;
-    run_event_loop(&mut terminal, &mut app, autosave)
+    run_screen(&mut app, autosave)
 }
 
-fn run_event_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut FlightsApp,
-    autosave: &mut Autosave,
-) -> io::Result<()> {
-    loop {
-        terminal.draw(|f| draw_ui(f, app))?;
-        // Every key and click comes back here, so this saves each change.
-        autosave.sync(&app.game.to_saved());
-        if app.should_quit {
-            return Ok(());
-        }
+impl GameScreen for FlightsApp {
+    type Saved = SavedGame;
 
-        match crate::input::read()? {
-            Event::Mouse(mouse) => {
-                let (col, row) = (mouse.column, mouse.row);
-                let free = !app.show_help && app.settings.is_none();
-                // On the map, the wheel zooms and a drag pans; over the route it
-                // scrolls that; elsewhere it moves the selection and a click acts.
-                let on_map = free && app.on_map(col, row);
-                let on_route = free && app.on_route(col, row);
-                match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) if on_map => {
-                        app.drag = app.current_view().map(|(_, view)| (col, row, view));
-                    }
-                    MouseEventKind::Down(MouseButton::Left) => app.handle_mouse_click(col, row),
-                    MouseEventKind::Drag(MouseButton::Left) => app.drag_to(col, row),
-                    MouseEventKind::Up(MouseButton::Left) => app.drag = None,
-                    MouseEventKind::ScrollUp if on_map => {
-                        app.zoom(1.0 / WHEEL_STEP, Some((col, row)))
-                    }
-                    MouseEventKind::ScrollDown if on_map => app.zoom(WHEEL_STEP, Some((col, row))),
-                    MouseEventKind::ScrollUp if on_route => app.scroll_route(-1),
-                    MouseEventKind::ScrollDown if on_route => app.scroll_route(1),
-                    MouseEventKind::ScrollUp if free => app.move_selection(false),
-                    MouseEventKind::ScrollDown if free => app.move_selection(true),
-                    _ => {}
+    fn draw(&mut self, f: &mut Frame) {
+        draw_ui(f, self);
+    }
+
+    fn saved(&self) -> Self::Saved {
+        self.game.to_saved()
+    }
+
+    fn should_quit(&self) -> bool {
+        self.should_quit
+    }
+
+    fn show_help(&mut self) -> &mut bool {
+        &mut self.show_help
+    }
+
+    fn on_mouse(&mut self, mouse: MouseEvent) {
+        {
+            let (col, row) = (mouse.column, mouse.row);
+            let free = self.settings.is_none();
+            // On the map, the wheel zooms and a drag pans; over the route it
+            // scrolls that; elsewhere it moves the selection and a click acts.
+            let on_map = free && self.on_map(col, row);
+            let on_route = free && self.on_route(col, row);
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) if on_map => {
+                    self.drag = self.current_view().map(|(_, view)| (col, row, view));
                 }
+                MouseEventKind::Down(MouseButton::Left) => self.handle_mouse_click(col, row),
+                MouseEventKind::Drag(MouseButton::Left) => self.drag_to(col, row),
+                MouseEventKind::Up(MouseButton::Left) => self.drag = None,
+                MouseEventKind::ScrollUp if on_map => self.zoom(1.0 / WHEEL_STEP, Some((col, row))),
+                MouseEventKind::ScrollDown if on_map => self.zoom(WHEEL_STEP, Some((col, row))),
+                MouseEventKind::ScrollUp if on_route => self.scroll_route(-1),
+                MouseEventKind::ScrollDown if on_route => self.scroll_route(1),
+                MouseEventKind::ScrollUp if free => self.move_selection(false),
+                MouseEventKind::ScrollDown if free => self.move_selection(true),
+                _ => {}
             }
-            Event::Key(key) => {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                if ctrl && key.code == KeyCode::Char('c') {
-                    return Ok(());
-                }
-                if app.show_help {
-                    if matches!(
-                        key.code,
-                        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') | KeyCode::Char('q')
-                    ) {
-                        app.show_help = false;
-                    }
-                    continue;
-                }
-                if let Some(page) = &mut app.settings {
-                    let typing = page.is_code_row();
-                    match key.code {
-                        KeyCode::Esc => app.close_settings(false),
-                        KeyCode::Char('s') if ctrl => app.close_settings(false),
-                        KeyCode::Enter if SETTINGS[page.row] == Setting::Reset => page.reset(),
-                        KeyCode::Enter => app.close_settings(true),
-                        KeyCode::Up => page.step_row(false),
-                        KeyCode::Down => page.step_row(true),
-                        // The start and end rows take a typed code.
-                        KeyCode::Char(c) if typing && c.is_ascii_alphabetic() => page.type_char(c),
-                        KeyCode::Backspace if typing => page.backspace(),
-                        KeyCode::Char('q') if !typing => app.close_settings(false),
-                        KeyCode::Left => page.change(false),
-                        KeyCode::Right | KeyCode::Char(' ') => page.change(true),
-                        _ => {}
-                    }
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Esc => return Ok(()),
-                    KeyCode::Char('?') => app.show_help = true,
-                    KeyCode::Char('n') if ctrl => app.start_new_game(None),
-                    KeyCode::Char('d') if ctrl => app.cycle_difficulty(),
-                    KeyCode::Char('t') if ctrl => app.start_daily_game(),
-                    KeyCode::Char('g') if ctrl => app.trigger_give_up(),
-                    KeyCode::Char('u') if ctrl => app.cycle_units(),
-                    KeyCode::Char('s') if ctrl => app.open_settings(),
-                    KeyCode::Up => app.move_selection(false),
-                    KeyCode::Down => app.move_selection(true),
-                    KeyCode::PageUp => app.scroll_route(-app.route_page()),
-                    KeyCode::PageDown => app.scroll_route(app.route_page()),
-                    // Left and Right step back and forward along the route: back a
-                    // hop, or fly to the selected airport. Backspace and Enter do
-                    // the same, for anyone used to them.
-                    KeyCode::Left | KeyCode::Backspace => app.go_back(),
-                    KeyCode::Right | KeyCode::Enter => app.submit(),
-                    // The map: + and - zoom, WASD pan, 0 fits it again.
-                    KeyCode::Char(c) if !ctrl && app.game.rules().shows_map() => {
-                        match c.to_ascii_lowercase() {
-                            '+' | '=' => app.zoom(1.0 / ZOOM_STEP, None),
-                            '-' | '_' => app.zoom(ZOOM_STEP, None),
-                            'w' => app.pan(0.0, PAN_STEP),
-                            's' => app.pan(0.0, -PAN_STEP),
-                            'a' => app.pan(-PAN_STEP, 0.0),
-                            'd' => app.pan(PAN_STEP, 0.0),
-                            '0' => app.fit_map(),
-                            _ => {}
-                        }
-                    }
+        }
+    }
+
+    fn on_key(&mut self, key: KeyEvent, ctrl: bool) -> ControlFlow<()> {
+        if let Some(page) = &mut self.settings {
+            let typing = page.is_code_row();
+            match key.code {
+                KeyCode::Esc => self.close_settings(false),
+                KeyCode::Char('s') if ctrl => self.close_settings(false),
+                KeyCode::Enter if SETTINGS[page.row] == Setting::Reset => page.reset(),
+                KeyCode::Enter => self.close_settings(true),
+                KeyCode::Up => page.step_row(false),
+                KeyCode::Down => page.step_row(true),
+                // The start and end rows take a typed code.
+                KeyCode::Char(c) if typing && c.is_ascii_alphabetic() => page.type_char(c),
+                KeyCode::Backspace if typing => page.backspace(),
+                KeyCode::Char('q') if !typing => self.close_settings(false),
+                KeyCode::Left => page.change(false),
+                KeyCode::Right | KeyCode::Char(' ') => page.change(true),
+                _ => {}
+            }
+            return ControlFlow::Continue(());
+        }
+        match key.code {
+            KeyCode::Esc => return ControlFlow::Break(()),
+            KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('n') if ctrl => self.start_new_game(None),
+            KeyCode::Char('d') if ctrl => self.cycle_difficulty(),
+            KeyCode::Char('t') if ctrl => self.start_daily_game(),
+            KeyCode::Char('g') if ctrl => self.trigger_give_up(),
+            KeyCode::Char('u') if ctrl => self.cycle_units(),
+            KeyCode::Char('s') if ctrl => self.open_settings(),
+            KeyCode::Up => self.move_selection(false),
+            KeyCode::Down => self.move_selection(true),
+            KeyCode::PageUp => self.scroll_route(-self.route_page()),
+            KeyCode::PageDown => self.scroll_route(self.route_page()),
+            // Left and Right step back and forward along the route: back a
+            // hop, or fly to the selected airport. Backspace and Enter do
+            // the same, for anyone used to them.
+            KeyCode::Left | KeyCode::Backspace => self.go_back(),
+            KeyCode::Right | KeyCode::Enter => self.submit(),
+            // The map: + and - zoom, WASD pan, 0 fits it again.
+            KeyCode::Char(c) if !ctrl && self.game.rules().shows_map() => {
+                match c.to_ascii_lowercase() {
+                    '+' | '=' => self.zoom(1.0 / ZOOM_STEP, None),
+                    '-' | '_' => self.zoom(ZOOM_STEP, None),
+                    'w' => self.pan(0.0, PAN_STEP),
+                    's' => self.pan(0.0, -PAN_STEP),
+                    'a' => self.pan(-PAN_STEP, 0.0),
+                    'd' => self.pan(PAN_STEP, 0.0),
+                    '0' => self.fit_map(),
                     _ => {}
                 }
             }
             _ => {}
         }
+        ControlFlow::Continue(())
     }
 }
 
 /// Draws a frame, on true black when colours are on (see
 /// [`crate::tui::paint_background`]).
 fn draw_ui(f: &mut Frame, app: &mut FlightsApp) {
-    draw_screen(f, app);
-    if app.use_color {
-        crate::tui::paint_background(f.buffer_mut());
-    }
+    draw_on_black(f, app.use_color, |f| draw_screen(f, app));
 }
 
 fn draw_screen(f: &mut Frame, app: &mut FlightsApp) {
     let title = " FLIGHTS ";
 
-    if f.area().width < MIN_RECOMMENDED_WIDTH {
-        app.footer_buttons = [Rect::default(); FOOTER_COUNT];
+    if draw_too_narrow(f, title, "flights") {
+        app.footer.clear();
         app.options_area = Rect::default();
-        let warning = Paragraph::new(vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "Terminal Width Too Narrow",
-                Style::default()
-                    .fg(COLOR_WARNING)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(format!(
-                "Current width: {} columns (minimum recommended: {MIN_RECOMMENDED_WIDTH} columns).",
-                f.area().width
-            )),
-            Line::from("Please widen your terminal window, or run `flights --plain`."),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Press [Esc] or [Ctrl+C] to quit.",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ])
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(Style::default().fg(COLOR_WARNING)),
-        );
-        f.render_widget(warning, f.area());
         return;
     }
 
     // The footer's buttons take as many rows as their labels need; a narrow
-    // screen stacks everything top to bottom and wraps the header.
-    let footer_actions: Vec<(&str, &str)> =
-        FOOTER_ACTIONS.iter().map(|&(_, k, l)| (k, l)).collect();
-    let footer_height = footer_height(f.area().width, &footer_actions);
-    let narrow = f.area().width < NARROW_WIDTH;
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(if narrow { 4 } else { 3 }),
-            Constraint::Min(12),
-            Constraint::Length(footer_height),
-        ])
-        .split(f.area());
+    // screen stacks everything top to bottom.
+    let (chunks, narrow) = screen_areas(f.area(), &app.footer, 12);
 
     draw_header(f, app, title, chunks[0]);
 
@@ -1039,12 +965,9 @@ fn draw_screen(f: &mut Frame, app: &mut FlightsApp) {
         }
         right[0]
     };
-    draw_status(f, app, status_area);
-    let button_areas = footer_areas(chunks[2], &footer_actions);
-    for (i, &(_, key_hint, label)) in FOOTER_ACTIONS.iter().enumerate() {
-        app.footer_buttons[i] = button_areas[i];
-        draw_footer_button(f, button_areas[i], key_hint, label);
-    }
+    let (msg, color) = &app.message;
+    crate::tui::draw_status(f, status_area, msg, *color);
+    app.footer.draw(f, chunks[2]);
 
     if let Some(page) = &app.settings {
         draw_settings(f, page);
@@ -1056,26 +979,8 @@ fn draw_screen(f: &mut Frame, app: &mut FlightsApp) {
 
 fn draw_header(f: &mut Frame, app: &FlightsApp, title: &'static str, area: Rect) {
     let game = &app.game;
-    let mut spans = vec![Span::styled(
-        title,
-        Style::default()
-            .fg(Color::Black)
-            .bg(COLOR_ACCENT)
-            .add_modifier(Modifier::BOLD),
-    )];
-    if let Some(date) = game.daily_date() {
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            format!(" DAILY {date} UTC "),
-            Style::default()
-                .fg(Color::Black)
-                .bg(COLOR_POSITIVE)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    let bold_white = Style::default()
-        .fg(Color::White)
-        .add_modifier(Modifier::BOLD);
+    let mut spans = header_spans(title, game.daily_date());
+    let bold_white = bold(Color::White);
     spans.extend([
         Span::raw("  "),
         Span::styled(game.start_code(), bold_white),
@@ -1093,16 +998,7 @@ fn draw_header(f: &mut Frame, app: &FlightsApp, title: &'static str, area: Rect)
             bold_white,
         ));
     }
-    f.render_widget(
-        Paragraph::new(Line::from(spans))
-            .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL)),
-        area,
-    );
-}
-
-fn bold(color: Color) -> Style {
-    Style::default().fg(color).add_modifier(Modifier::BOLD)
+    crate::tui::draw_header(f, spans, area);
 }
 
 /// The lines for `route`, two to a stop: the code with its distance and
@@ -1407,20 +1303,6 @@ fn status_height(app: &FlightsApp, column: Rect, least: u16) -> Constraint {
     Constraint::Length((lines + 2).clamp(least, (column.height / 2).max(least)))
 }
 
-fn draw_status(f: &mut Frame, app: &FlightsApp, area: Rect) {
-    let (msg, color) = &app.message;
-    f.render_widget(
-        Paragraph::new(
-            msg.lines()
-                .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(*color))))
-                .collect::<Vec<_>>(),
-        )
-        .wrap(Wrap { trim: true })
-        .block(Block::default().borders(Borders::ALL).title(" Status ")),
-        area,
-    );
-}
-
 /// Map bounds `(lon_min, lon_max, lat_min, lat_max)` fitting `points` with padding,
 /// widened so a degree of longitude and of latitude look the same length in a
 /// `cols` by `rows` area of braille (each cell is about twice as tall as wide).
@@ -1576,18 +1458,27 @@ fn path_canvas<'a>(
     Canvas::default()
         .x_bounds([x0, x1])
         .y_bounds([y0, y1])
-        .paint(move |ctx| {
-            for hop in paths {
-                for w in hop.windows(2) {
-                    let ((alat, alon), (blat, blon)) = (net.coords(w[0]), net.coords(w[1]));
-                    if let Some(((ax, ay), (bx, by))) =
-                        clip((alon, alat), (blon, blat), (x0, x1, y0, y1))
-                    {
-                        ctx.draw(&CanvasLine::new(ax, ay, bx, by, color));
-                    }
-                }
-            }
-        })
+        .paint(move |ctx| draw_paths(ctx, net, (x0, x1, y0, y1), paths, color))
+}
+
+/// Draws `paths` (each hop as the airports it flies through) as lines clipped
+/// to `bounds`.
+fn draw_paths(
+    ctx: &mut ratatui::widgets::canvas::Context,
+    net: &crate::flights::data::Network,
+    bounds: Bounds,
+    paths: &[Vec<usize>],
+    color: Color,
+) {
+    let xy = |i: usize| {
+        let (lat, lon) = net.coords(i);
+        (lon, lat)
+    };
+    for w in paths.iter().flat_map(|path| path.windows(2)) {
+        if let Some(((ax, ay), (bx, by))) = clip(xy(w[0]), xy(w[1]), bounds) {
+            ctx.draw(&CanvasLine::new(ax, ay, bx, by, color));
+        }
+    }
 }
 
 fn draw_map(f: &mut Frame, app: &FlightsApp, area: Rect) {
@@ -1608,17 +1499,16 @@ fn draw_map(f: &mut Frame, app: &FlightsApp, area: Rect) {
         path.push(b);
         path
     };
-    let flown: Vec<Vec<usize>> = route
-        .windows(2)
-        .zip(game.legs())
-        .map(|(w, leg)| path_of(w[0], &leg.via, w[1]))
-        .collect();
-    let best: Vec<Vec<usize>> = if game.status() == Status::GivenUp {
-        game.best_route()
+    let paths_of = |route: &[usize], legs: &[Ticket]| -> Vec<Vec<usize>> {
+        route
             .windows(2)
-            .zip(game.best_legs())
+            .zip(legs)
             .map(|(w, leg)| path_of(w[0], &leg.via, w[1]))
             .collect()
+    };
+    let flown = paths_of(route, game.legs());
+    let best = if game.status() == Status::GivenUp {
+        paths_of(game.best_route(), game.best_legs())
     } else {
         Vec::new()
     };
@@ -1696,10 +1586,7 @@ fn draw_map(f: &mut Frame, app: &FlightsApp, area: Rect) {
     }
     label(game.origin(), bold(Color::White), Color::White);
     if let Some(i) = selected {
-        let style = Style::default()
-            .fg(Color::Black)
-            .bg(COLOR_WARNING)
-            .add_modifier(Modifier::BOLD);
+        let style = black_on(COLOR_WARNING);
         label(i, style, COLOR_WARNING);
     }
     for o in &options {
@@ -1733,17 +1620,8 @@ fn draw_map(f: &mut Frame, app: &FlightsApp, area: Rect) {
                 color: Color::DarkGray,
             });
             ctx.layer();
-            let mut segments = |paths: &[Vec<usize>], color: Color| {
-                for path in paths {
-                    for w in path.windows(2) {
-                        if let Some(((ax, ay), (bx, by))) = clip(xy(w[0]), xy(w[1]), bounds) {
-                            ctx.draw(&CanvasLine::new(ax, ay, bx, by, color));
-                        }
-                    }
-                }
-            };
-            segments(&flown, COLOR_ACCENT);
-            segments(&best, COLOR_POSITIVE);
+            draw_paths(ctx, net, bounds, &flown, COLOR_ACCENT);
+            draw_paths(ctx, net, bounds, &best, COLOR_POSITIVE);
             ctx.layer();
             for &(x, y, color) in &labels.dots {
                 ctx.draw(&Points {
@@ -1791,7 +1669,6 @@ fn draw_help(f: &mut Frame, game: &FlightsGame) {
             format!("≤{}", grouped(custom.puzzle_count()))
         },
     });
-    let bullet = |text: &'static str| HelpLine::Bullet(Line::from(text));
     let page = HelpPage {
         game: "Flights",
         tagline: "the shortest way, one letter at a time".to_string(),
@@ -1800,12 +1677,18 @@ fn draw_help(f: &mut Frame, game: &FlightsGame) {
                 title: "Rules",
                 lines: {
                     let mut rules = vec![
-                        bullet("Each hop changes one letter of the code: LAX → LAS → LOS."),
-                        bullet("A hop needs a ticket, direct or 1 connection; every leg counts."),
-                        bullet("Reach it the long way and you'll be told; go back to improve."),
+                        HelpLine::bullet(
+                            "Each hop changes one letter of the code: LAX → LAS → LOS.",
+                        ),
+                        HelpLine::bullet(
+                            "A hop needs a ticket, direct or 1 connection; every leg counts.",
+                        ),
+                        HelpLine::bullet(
+                            "Reach it the long way and you'll be told; go back to improve.",
+                        ),
                     ];
                     if game.rules().once_per_airport() {
-                        rules.push(bullet(
+                        rules.push(HelpLine::bullet(
                             "This game uses each airport once, connections included.",
                         ));
                     }
@@ -1847,7 +1730,7 @@ fn draw_help(f: &mut Frame, game: &FlightsGame) {
             HelpSection {
                 title: "Credits",
                 lines: vec![
-                    HelpLine::Credit("By", "Gus Lipkin (https://guslipkin.me)".to_string()),
+                    HelpLine::author(),
                     HelpLine::Credit(
                         "Data",
                         "Routes: Wikipedia (CC BY-SA). Airports: OurAirports.".to_string(),
@@ -2056,16 +1939,10 @@ fn view_note(view: Difficulty) -> &'static str {
 mod tests {
     use super::*;
     use crate::flights::game::Units;
-    use ratatui::backend::TestBackend;
+    use crate::tui::{render_buffer, screen_text};
 
     fn render(app: &mut FlightsApp, width: u16, height: u16) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| draw_ui(f, app)).unwrap();
-        let buf = terminal.backend().buffer().clone();
-        (0..height)
-            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
+        screen_text(&buffer(app, width, height))
     }
 
     fn app(difficulty: Difficulty) -> FlightsApp {
@@ -2091,9 +1968,7 @@ mod tests {
     }
 
     fn buffer(app: &mut FlightsApp, width: u16, height: u16) -> ratatui::buffer::Buffer {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| draw_ui(f, app)).unwrap();
-        terminal.backend().buffer().clone()
+        render_buffer(width, height, |f| draw_ui(f, app))
     }
 
     #[test]
@@ -2899,7 +2774,7 @@ mod tests {
         let screen = render(&mut app, 120, 34);
         show(&screen);
         assert!(screen.contains("A shortest route"));
-        let btn = app.footer_buttons[2];
+        let btn = app.footer.buttons[2];
         app.handle_mouse_click(btn.x + 1, btn.y + 1);
         assert_eq!(app.game.status(), Status::Playing);
     }

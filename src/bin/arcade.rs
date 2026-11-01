@@ -11,25 +11,19 @@
 //! keep each other's games. Since the games run inside it, it never starts
 //! another program, so nothing a player does reaches a command line.
 
-use std::io::{self, stdout, Stdout};
+use std::io::{self, Stdout};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
 use clap::Parser;
-use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEventKind,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use jotto::game::GameMode;
+use jotto::tui::{black_on, bold, enter_tui, rect_contains, COLOR_ACCENT, COLOR_WARNING};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
@@ -43,11 +37,6 @@ struct ArcadeArgs {
     #[arg(long)]
     session_saves: bool,
 }
-
-/// Sky blue, the games' accent colour (Okabe-Ito).
-const ACCENT: Color = Color::Rgb(86, 180, 233);
-/// Orange, for a game that couldn't start (Okabe-Ito).
-const WARNING: Color = Color::Rgb(230, 159, 0);
 
 /// A game's entry: it plays the game in its TUI and returns when it ends.
 type Play = fn() -> Result<(), String>;
@@ -103,25 +92,6 @@ impl Drop for SessionDir {
     }
 }
 
-/// The full-screen terminal for the menu, restored when it drops, so a game
-/// starts on the normal screen and sets the terminal up as it likes.
-struct Screen(Terminal<CrosstermBackend<Stdout>>);
-
-impl Screen {
-    fn enter() -> io::Result<Self> {
-        enable_raw_mode()?;
-        execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
-        Ok(Self(Terminal::new(CrosstermBackend::new(stdout()))?))
-    }
-}
-
-impl Drop for Screen {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
-    }
-}
-
 fn main() -> io::Result<()> {
     let args = ArcadeArgs::parse();
     // Kept alive until the menu is quit, then removed with its saves.
@@ -136,9 +106,11 @@ fn main() -> io::Result<()> {
     let mut selected = 0;
     let mut note: Option<String> = None;
     loop {
+        // The menu's terminal is put back before a game starts, so the game
+        // sets it up as it likes.
         let choice = {
-            let mut screen = Screen::enter()?;
-            pick(&mut screen.0, &mut selected, note.take())?
+            let (_guard, mut terminal) = enter_tui()?;
+            pick(&mut terminal, &mut selected, note.take())?
         };
         let Some(i) = choice else {
             return Ok(());
@@ -206,9 +178,7 @@ fn pick(
 
 /// The row (a game, or Quit) at terminal cell (`col`, `row`), if any.
 fn row_at(items: &[Rect], col: u16, row: u16) -> Option<usize> {
-    items
-        .iter()
-        .position(|r| r.width > 0 && row == r.y && col >= r.x && col < r.x + r.width)
+    items.iter().position(|&r| rect_contains(r, col, row))
 }
 
 /// Draws the menu, returning where each row went, so the mouse can find them.
@@ -235,7 +205,7 @@ fn draw(f: &mut Frame, selected: usize, note: Option<&str>) -> [Rect; ROWS] {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT))
+        .border_style(Style::default().fg(COLOR_ACCENT))
         .title(Line::from(" Arcade ").centered())
         .title_bottom(
             Line::from(Span::styled(FOOTER, Style::default().fg(Color::Gray))).centered(),
@@ -252,12 +222,7 @@ fn draw(f: &mut Frame, selected: usize, note: Option<&str>) -> [Rect; ROWS] {
         .split(inner);
     f.render_widget(
         Paragraph::new(vec![
-            Line::from(Span::styled(
-                "  Choose a game",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )),
+            Line::from(Span::styled("  Choose a game", bold(Color::White))),
             Line::from(Span::styled(
                 "  Leaving a game brings you back here.",
                 Style::default().fg(Color::Gray),
@@ -275,23 +240,20 @@ fn draw(f: &mut Frame, selected: usize, note: Option<&str>) -> [Rect; ROWS] {
         let chosen = i == selected;
         let marker = if chosen { " > " } else { "   " };
         let style = if chosen {
-            Style::default()
-                .fg(Color::Black)
-                .bg(ACCENT)
-                .add_modifier(Modifier::BOLD)
+            black_on(COLOR_ACCENT)
         } else {
             Style::default().fg(Color::White)
         };
         let about = Span::styled(about, Style::default().fg(Color::Gray));
         if stacked {
             lines.push(Line::from(vec![
-                Span::styled(marker, Style::default().fg(ACCENT)),
+                Span::styled(marker, Style::default().fg(COLOR_ACCENT)),
                 Span::styled(format!(" {label:<12}"), style),
             ]));
             lines.push(Line::from(vec![Span::raw("      "), about]));
         } else {
             lines.push(Line::from(vec![
-                Span::styled(marker, Style::default().fg(ACCENT)),
+                Span::styled(marker, Style::default().fg(COLOR_ACCENT)),
                 Span::styled(format!(" {label:<12}"), style),
                 Span::raw("  "),
                 about,
@@ -319,7 +281,7 @@ fn draw(f: &mut Frame, selected: usize, note: Option<&str>) -> [Rect; ROWS] {
         f.render_widget(
             Paragraph::new(Span::styled(
                 format!("  {note}"),
-                Style::default().fg(WARNING),
+                Style::default().fg(COLOR_WARNING),
             )),
             rows[2],
         );

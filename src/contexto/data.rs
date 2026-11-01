@@ -5,8 +5,11 @@ use crate::dict::DAILY_EPOCH_DAY;
 
 /// Word lists and int8 meaning vectors written by `scripts/build-contexto-data.py`
 /// (see its docstring for the layout). Committed rather than built by `build.rs`,
-/// since the GloVe vectors it comes from are an 822 MB download.
-static DATA: &[u8] = include_bytes!("../../data/contexto.bin");
+/// since the GloVe vectors it comes from are an 822 MB download. `build.rs` splits
+/// it: the word lists before the vectors are deflated, and the vectors, which
+/// barely deflate, are embedded as they are and read in place.
+static TEXT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/contexto.bin.deflate"));
+static VECTORS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/contexto.vectors"));
 
 const MAGIC: &[u8; 4] = b"CTXO";
 const FORMAT_VERSION: u8 = 2;
@@ -35,7 +38,11 @@ pub struct Lexicon {
 /// Returns the embedded lexicon, parsed on first use.
 pub fn lexicon() -> &'static Lexicon {
     static LEXICON: OnceLock<Lexicon> = OnceLock::new();
-    LEXICON.get_or_init(|| Lexicon::parse(DATA))
+    static TEXT_DATA: OnceLock<Vec<u8>> = OnceLock::new();
+    LEXICON.get_or_init(|| {
+        let text = TEXT_DATA.get_or_init(|| crate::inflate(TEXT, "contexto.bin"));
+        Lexicon::parse(text, VECTORS)
+    })
 }
 
 fn read_blob(data: &'static [u8], pos: &mut usize) -> Vec<&'static str> {
@@ -51,7 +58,7 @@ fn read_blob(data: &'static [u8], pos: &mut usize) -> Vec<&'static str> {
 }
 
 impl Lexicon {
-    fn parse(data: &'static [u8]) -> Self {
+    fn parse(data: &'static [u8], vectors: &'static [u8]) -> Self {
         assert_eq!(&data[..4], MAGIC, "contexto.bin has the wrong magic number");
         assert_eq!(
             data[4], FORMAT_VERSION,
@@ -68,7 +75,11 @@ impl Lexicon {
             .collect();
         pos += words.len();
         let core_count = core.iter().filter(|&&c| c).count();
-        let vectors = &data[pos..];
+        assert_eq!(
+            pos,
+            data.len(),
+            "contexto.bin's word lists end where build.rs split them"
+        );
         assert_eq!(
             vectors.len(),
             words.len() * dim,
@@ -242,10 +253,7 @@ impl Lexicon {
 
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
+    crate::dict::mix64(*state)
 }
 
 /// Every guessable word's rank against one secret.

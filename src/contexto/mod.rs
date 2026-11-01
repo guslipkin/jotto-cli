@@ -4,8 +4,6 @@
 //! It shares the crate's SCOWL-era helpers (dates, colour detection, input cleanup) but
 //! not jotto's and wordle's game engine or TUI, which are built around 5-letter words.
 
-use std::process;
-
 use clap::Parser;
 
 pub mod data;
@@ -13,7 +11,6 @@ pub mod game;
 pub mod plain;
 pub mod tui;
 
-use crate::save::{self, Autosave};
 use game::{ContextoGame, Difficulty};
 
 /// Find the secret word by its meaning: each guess is ranked by how close it is.
@@ -46,7 +43,7 @@ pub struct ContextoArgs {
 pub fn play() -> Result<(), String> {
     crate::play_saved(
         "contexto",
-        |loaded| ContextoGame::start(None, false, None, loaded).map_err(|e| e.to_string()),
+        |loaded| ContextoGame::start(None, false, None, loaded),
         tui::run,
     )
 }
@@ -54,19 +51,12 @@ pub fn play() -> Result<(), String> {
 /// CLI entrypoint for the `contexto` binary.
 pub fn run_cli() {
     let args = ContextoArgs::parse();
-    let path = save::save_path("contexto");
-    let loaded = path.as_deref().map_or(save::Loaded::Missing, save::load);
-
-    let (game, notice) =
-        match ContextoGame::start(args.difficulty, args.daily, args.word.as_deref(), loaded) {
-            Ok(started) => started,
-            Err(err) => {
-                eprintln!("Error initializing game with custom word: {err}");
-                process::exit(1);
-            }
-        };
-
-    let mut autosave = Autosave::new(path);
-    autosave.notice = notice;
-    crate::run_frontend(game, autosave, args.plain, plain::run, tui::run);
+    crate::run_command(
+        "contexto",
+        "Error initializing game with custom word",
+        |loaded| ContextoGame::start(args.difficulty, args.daily, args.word.as_deref(), loaded),
+        args.plain,
+        plain::run,
+        tui::run,
+    );
 }

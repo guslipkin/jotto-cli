@@ -1,25 +1,25 @@
 use std::io;
 use std::str::FromStr;
 
-use crate::contexto::game::grouped;
 use crate::flights::data::MAX_CONNECTIONS;
 use crate::flights::game::{
     code_str, parse_code, Code, Difficulty, FlightsGame, FlyOutcome, Rules, Status, Units,
     MAX_HOPS, MIN_HOPS,
 };
 use crate::line_input::LineReader;
+use crate::plain::{next_line, split_command, title_line};
 use crate::save::Autosave;
+use crate::text::AUTHOR;
+use crate::text::{grouped, plural_s};
 
 /// Runs the line-by-line REPL / Plain CLI mode. There's no map here, so Easy and
 /// Medium list the options the way Hard does, with Easy adding distances.
 pub fn run(mut game: FlightsGame, autosave: &mut Autosave) -> io::Result<()> {
-    match game.daily_date() {
-        Some(date) => println!(
-            "=== FLIGHTS [DAILY {date} UTC] === (Difficulty: {})",
-            game.difficulty()
-        ),
-        None => println!("=== FLIGHTS === (Difficulty: {})", game.difficulty()),
-    }
+    println!(
+        "{} (Difficulty: {})",
+        title_line("FLIGHTS", game.daily_date()),
+        game.difficulty()
+    );
     println!(
         "Fly to the destination by the shortest route, changing one letter of the code per hop."
     );
@@ -31,24 +31,11 @@ pub fn run(mut game: FlightsGame, autosave: &mut Autosave) -> io::Result<()> {
 
     let mut reader = LineReader::new();
     loop {
-        // Every command and flight comes back here, so this saves each change.
-        autosave.sync(&game.to_saved());
-        let Some(raw_line) = reader.read_line(&format!(
-            "flights {}> ",
-            game.network().code(game.current())
-        ))?
-        else {
-            println!();
+        let prompt = format!("flights {}> ", game.network().code(game.current()));
+        let Some(lower) = next_line(&mut reader, autosave, &game.to_saved(), &prompt)? else {
             break;
         };
-        let lower = raw_line.trim().to_ascii_lowercase();
-        if lower.is_empty() {
-            continue;
-        }
-        let (cmd, arg) = match lower.split_once(char::is_whitespace) {
-            Some((c, a)) => (c, Some(a.trim())),
-            None => (lower.as_str(), None),
-        };
+        let (cmd, arg) = split_command(&lower);
 
         // A bare three-letter word is always a code, so commands need their colon
         // (bar `?`): "new", "end" and the like are airports.
@@ -360,7 +347,7 @@ fn print_position(game: &FlightsGame) {
         game.end_code(),
         place(game.destination()),
         game.hops(),
-        if game.hops() == 1 { "" } else { "s" },
+        plural_s(game.hops()),
     );
     println!(
         "  {}  start{}",
@@ -494,7 +481,7 @@ fn print_help(game: &FlightsGame) {
 
 fn print_credits() {
     println!();
-    println!("FLIGHTS CLI was written by Gus Lipkin (https://guslipkin.me).");
+    println!("FLIGHTS CLI was written by {AUTHOR}.");
     println!("Routes come from English Wikipedia's airport articles (CC BY-SA 4.0).");
     println!("Airports and coordinates come from OurAirports (https://ourairports.com/data/), public domain.");
     println!("Map coastlines come from Natural Earth (https://www.naturalearthdata.com/), public domain.");

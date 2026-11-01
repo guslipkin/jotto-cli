@@ -8,28 +8,58 @@ use crate::game::{
 };
 use crate::line_input::LineReader;
 use crate::save::Autosave;
+use crate::text::AUTHOR;
 use crate::tui::{ansi_rgb, COLOR_NEGATIVE, COLOR_POSITIVE, COLOR_WARNING};
+
+/// A game's plain-mode title, `=== TITLE ===`, with the date for a daily game.
+pub(crate) fn title_line(title: &str, daily: Option<&str>) -> String {
+    match daily {
+        Some(date) => format!("=== {title} [DAILY {date} UTC] ==="),
+        None => format!("=== {title} ==="),
+    }
+}
+
+/// Saves the game (every command and guess comes back here, so this saves each
+/// change), then reads the next line that isn't blank, trimmed and lower-cased:
+/// `None` once input ends.
+pub(crate) fn next_line(
+    reader: &mut LineReader,
+    autosave: &mut Autosave,
+    saved: &impl serde::Serialize,
+    prompt: &str,
+) -> io::Result<Option<String>> {
+    autosave.sync(saved);
+    loop {
+        let Some(raw_line) = reader.read_line(prompt)? else {
+            println!();
+            return Ok(None);
+        };
+        let lower = raw_line.trim().to_ascii_lowercase();
+        if !lower.is_empty() {
+            return Ok(Some(lower));
+        }
+    }
+}
+
+/// A command line's command and, after the first space, its argument.
+pub(crate) fn split_command(line: &str) -> (&str, Option<&str>) {
+    match line.split_once(char::is_whitespace) {
+        Some((cmd, arg)) => (cmd, Some(arg.trim())),
+        None => (line, None),
+    }
+}
 
 /// Runs the line-by-line REPL / Plain CLI mode for either Jotto or Wordle.
 pub fn run(mut game: GameState, autosave: &mut Autosave) -> io::Result<()> {
     let mode = game.mode();
     let use_color = supports_color();
 
-    if let Some(date) = game.daily_date() {
-        println!(
-            "=== {} [DAILY {date} UTC] === (Difficulty: {} | {} words)",
-            mode.title(),
-            game.difficulty(),
-            dict::word_count(mode, game.difficulty().scowl_size())
-        );
-    } else {
-        println!(
-            "=== {} === (Difficulty: {} | {} words)",
-            mode.title(),
-            game.difficulty(),
-            dict::word_count(mode, game.difficulty().scowl_size())
-        );
-    }
+    println!(
+        "{} (Difficulty: {} | {} words)",
+        title_line(mode.title(), game.daily_date()),
+        game.difficulty(),
+        dict::word_count(mode, game.difficulty().scowl_size())
+    );
     println!("Type a 5-letter word to guess, or ':help' for commands.");
     if let Some(notice) = autosave.notice.take() {
         println!("{}", notice.text());
@@ -39,19 +69,8 @@ pub fn run(mut game: GameState, autosave: &mut Autosave) -> io::Result<()> {
     }
 
     let mut reader = LineReader::new();
-    loop {
-        // Every command and guess comes back here, so this saves each change.
-        autosave.sync(&game.to_saved());
-        let Some(raw_line) = reader.read_line(&format!("{}> ", mode.command_name()))? else {
-            println!();
-            break;
-        };
-        let trimmed = raw_line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let lower = trimmed.to_ascii_lowercase();
+    let prompt = format!("{}> ", mode.command_name());
+    while let Some(lower) = next_line(&mut reader, autosave, &game.to_saved(), &prompt)? {
         let mut parts = lower.split_whitespace();
         let cmd = parts.next().unwrap_or("");
         let rest: Vec<&str> = parts.collect();
@@ -85,18 +104,8 @@ pub fn run(mut game: GameState, autosave: &mut Autosave) -> io::Result<()> {
                 print_scratch(&game, use_color);
                 continue;
             }
-            ":giveup" | "giveup" => {
-                if game.status() != GameStatus::Playing {
-                    println!(
-                        "The current game is already over. Type ':new' or ':daily' to play again."
-                    );
-                } else {
-                    game.give_up();
-                    println!("Your word is: {}", game.secret_word().to_ascii_uppercase());
-                }
-                continue;
-            }
-            "give" if arg == Some("up") => {
+            // "give up" as two words too.
+            ":giveup" | "giveup" | "give" if cmd != "give" || arg == Some("up") => {
                 if game.status() != GameStatus::Playing {
                     println!(
                         "The current game is already over. Type ':new' or ':daily' to play again."
@@ -447,10 +456,7 @@ fn print_help(mode: GameMode, use_color: bool) {
 
 fn print_credits(mode: GameMode) {
     println!();
-    println!(
-        "{} CLI was written by Gus Lipkin (https://guslipkin.me).",
-        mode.title()
-    );
+    println!("{} CLI was written by {AUTHOR}.", mode.title());
     println!("The word list comes from SCOWL (http://wordlist.aspell.net/).");
     if mode == GameMode::Wordle {
         println!(

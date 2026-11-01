@@ -4,13 +4,14 @@ use std::str::FromStr;
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-use crate::contexto::game::grouped;
 use crate::dict;
 use crate::flights::data::{
     letters_apart, network, Hop, Network, OnceRoute, Ticket, MAX_CONNECTIONS, STANDARD_CONNECTIONS,
 };
 use crate::game::sanitize_input;
 use crate::save::{self, enum_name, parse_enum, Loaded, Notice, Saveable, SAVE_VERSION};
+use crate::text::GAME_OVER;
+use crate::text::{grouped, plural_s};
 
 /// How long a puzzle may be and how much the player is shown. Each standard level
 /// deals the easier levels' puzzles too, and shows less than the one before it.
@@ -61,36 +62,17 @@ impl Difficulty {
         }
     }
 
-    /// Cycles to the next difficulty level.
-    pub const fn next(self) -> Self {
-        match self {
-            Self::Easy => Self::Medium,
-            Self::Medium => Self::Hard,
-            Self::Hard => Self::Pilot,
-            Self::Pilot => Self::Custom,
-            Self::Custom => Self::Easy,
-        }
+    /// Cycles to the next one, in declaration order.
+    pub fn next(self) -> Self {
+        save::next_variant(&self)
     }
 
     /// The rules a game at this level plays by: a standard level's own, or
     /// `custom` for [`Difficulty::Custom`].
     pub fn rules(self, custom: Rules) -> Rules {
-        let (max_hops, view) = match self {
-            Self::Easy => (Some(4), self),
-            Self::Medium => (Some(6), self),
-            Self::Hard => (Some(8), self),
-            Self::Pilot => (None, self),
-            Self::Custom => return custom,
-        };
-        Rules {
-            view,
-            max_hops,
-            max_connections: STANDARD_CONNECTIONS,
-            show_places: true,
-            fixed_route: false,
-            start: None,
-            end: None,
-            reuse_connections: true,
+        match self {
+            Self::Custom => custom,
+            level => Rules::standard(level),
         }
     }
 
@@ -100,26 +82,17 @@ impl Difficulty {
     }
 }
 
-impl fmt::Display for Difficulty {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
+display_label!(Difficulty, Units);
 
 impl FromStr for Difficulty {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "easy" | "e" => Ok(Self::Easy),
-            "medium" | "med" | "m" => Ok(Self::Medium),
-            "hard" | "h" => Ok(Self::Hard),
-            "pilot" | "p" => Ok(Self::Pilot),
-            "custom" | "c" => Ok(Self::Custom),
-            other => Err(format!(
-                "Unknown difficulty '{other}'. Choose: easy, medium, hard, pilot or custom."
-            )),
-        }
+        // The same names and aliases the command line takes.
+        let s = s.trim().to_ascii_lowercase();
+        parse_enum(&s).ok_or_else(|| {
+            format!("Unknown difficulty '{s}'. Choose: easy, medium, hard, pilot or custom.")
+        })
     }
 }
 
@@ -170,12 +143,17 @@ pub fn code_str(code: &Code) -> &str {
     std::str::from_utf8(code).expect("codes are ASCII letters")
 }
 
-impl Default for Rules {
-    /// Custom's starting settings: Medium's.
-    fn default() -> Self {
+impl Rules {
+    /// A standard level's rules, which it's also the view of.
+    const fn standard(view: Difficulty) -> Self {
         Self {
-            view: Difficulty::Medium,
-            max_hops: Some(6),
+            view,
+            max_hops: match view {
+                Difficulty::Easy => Some(4),
+                Difficulty::Medium => Some(6),
+                Difficulty::Hard => Some(8),
+                Difficulty::Pilot | Difficulty::Custom => None,
+            },
             max_connections: STANDARD_CONNECTIONS,
             show_places: true,
             fixed_route: false,
@@ -183,6 +161,13 @@ impl Default for Rules {
             end: None,
             reuse_connections: true,
         }
+    }
+}
+
+impl Default for Rules {
+    /// Custom's starting settings: Medium's.
+    fn default() -> Self {
+        Self::standard(Difficulty::Medium)
     }
 }
 
@@ -272,7 +257,7 @@ impl Rules {
                                 "{} has no hops with {} connection{}",
                                 code_str(c),
                                 self.connections(),
-                                if self.connections() == 1 { "" } else { "s" }
+                                plural_s(self.connections())
                             )
                         })
                 })
@@ -428,7 +413,7 @@ impl Rules {
             self.view,
             self.hops_text(),
             self.connections(),
-            if self.connections() == 1 { "" } else { "s" },
+            plural_s(self.connections()),
             if self.once_per_airport() {
                 ", each airport once"
             } else {
@@ -537,13 +522,9 @@ impl Units {
         }
     }
 
-    /// Cycles to the next unit.
-    pub const fn next(self) -> Self {
-        match self {
-            Self::Nm => Self::Mi,
-            Self::Mi => Self::Km,
-            Self::Km => Self::Nm,
-        }
+    /// Cycles to the next one, in declaration order.
+    pub fn next(self) -> Self {
+        save::next_variant(&self)
     }
 
     /// Converts nautical miles to this unit.
@@ -562,12 +543,6 @@ impl Units {
             grouped(self.convert(nm).round() as usize),
             self.label()
         )
-    }
-}
-
-impl fmt::Display for Units {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
     }
 }
 
@@ -617,9 +592,7 @@ pub enum FlyError {
 impl fmt::Display for FlyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::GameOver => {
-                f.write_str("The current game is already over. Start a new game to play again.")
-            }
+            Self::GameOver => f.write_str(GAME_OVER),
             Self::Empty => f.write_str("Type an airport code to fly to."),
             Self::NotACode(s) => write!(f, "'{s}' isn't an airport code: codes are 3 letters."),
             Self::UnknownAirport(c) => write!(
@@ -1261,7 +1234,7 @@ impl FlightsGame {
             "Flights {} → {}{daily}: shortest route in {hops} hop{}, {}, {tries}",
             self.start_code(),
             self.end_code(),
-            if hops == 1 { "" } else { "s" },
+            plural_s(hops),
             self.units.format(self.total_distance())
         )
     }
@@ -1330,8 +1303,7 @@ impl FlightsGame {
         let Some(play) = &saved.game else {
             return Ok(None);
         };
-        let difficulty: Difficulty = parse_enum(&play.difficulty)
-            .ok_or_else(|| format!("unknown difficulty '{}'", play.difficulty))?;
+        let difficulty: Difficulty = save::saved_difficulty(&play.difficulty)?;
         let units = parse_enum(&saved.units).unwrap_or_default();
         let custom = saved
             .custom

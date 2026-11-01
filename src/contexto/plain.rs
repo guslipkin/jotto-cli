@@ -2,13 +2,14 @@ use std::io;
 use std::str::FromStr;
 
 use crate::contexto::data::lexicon;
-use crate::contexto::game::{
-    bar_filled, grouped, ContextoGame, Difficulty, Guess, HintError, Status,
-};
+use crate::contexto::game::{bar_filled, ContextoGame, Difficulty, Guess, HintError, Status};
 use crate::contexto::tui::closeness_color;
 use crate::game::supports_color;
 use crate::line_input::LineReader;
+use crate::plain::{next_line, split_command, title_line};
 use crate::save::Autosave;
+use crate::text::grouped;
+use crate::text::AUTHOR;
 use crate::tui::ansi_rgb;
 
 /// Closest guesses shown after each guess (`:history` shows them all).
@@ -22,19 +23,12 @@ pub fn run(mut game: ContextoGame, autosave: &mut Autosave) -> io::Result<()> {
     let use_color = supports_color();
     let lex = lexicon();
 
-    if let Some(date) = game.daily_date() {
-        println!(
-            "=== CONTEXTO [DAILY {date} UTC] === (Difficulty: {} | {} words)",
-            game.difficulty(),
-            grouped(lex.guessable_count())
-        );
-    } else {
-        println!(
-            "=== CONTEXTO === (Difficulty: {} | {} words)",
-            game.difficulty(),
-            grouped(lex.guessable_count())
-        );
-    }
+    println!(
+        "{} (Difficulty: {} | {} words)",
+        title_line("CONTEXTO", game.daily_date()),
+        game.difficulty(),
+        grouped(lex.guessable_count())
+    );
     println!(
         "Guess the secret word. Each guess is ranked by how close its meaning is (1 = the word)."
     );
@@ -47,23 +41,9 @@ pub fn run(mut game: ContextoGame, autosave: &mut Autosave) -> io::Result<()> {
     }
 
     let mut reader = LineReader::new();
-    loop {
-        // Every command and guess comes back here, so this saves each change.
-        autosave.sync(&game.to_saved());
-        let Some(raw_line) = reader.read_line("contexto> ")? else {
-            println!();
-            break;
-        };
-        let lower = raw_line.trim().to_ascii_lowercase();
-        if lower.is_empty() {
-            continue;
-        }
-
+    while let Some(lower) = next_line(&mut reader, autosave, &game.to_saved(), "contexto> ")? {
         // Commands that take a difficulty argument.
-        let (cmd, arg) = match lower.split_once(char::is_whitespace) {
-            Some((c, a)) => (c, Some(a.trim())),
-            None => (lower.as_str(), None),
-        };
+        let (cmd, arg) = split_command(&lower);
         match cmd {
             ":new" | ":reset" => {
                 match arg.map(Difficulty::from_str).transpose() {
@@ -275,7 +255,7 @@ fn print_help() {
 
 fn print_credits() {
     println!();
-    println!("CONTEXTO CLI was written by Gus Lipkin (https://guslipkin.me).");
+    println!("CONTEXTO CLI was written by {AUTHOR}.");
     println!("It's inspired by Contexto: play the original at https://contexto.me/");
     println!("The word list comes from SCOWL (http://wordlist.aspell.net/).");
     println!("Difficulty levels come from WordNet 3.0's noun categories (https://wordnet.princeton.edu/), Princeton University.");

@@ -7,12 +7,12 @@
 //! when it's wide enough.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::tui::COLOR_ACCENT;
+use crate::tui::{black_on, bold, COLOR_ACCENT};
 
 /// One line of a help section.
 pub(crate) enum HelpLine {
@@ -29,6 +29,18 @@ pub(crate) enum HelpLine {
     },
     /// A credit: what, then who or where.
     Credit(&'static str, String),
+}
+
+impl HelpLine {
+    /// A bullet point of `text`.
+    pub(crate) fn bullet(text: impl Into<Line<'static>>) -> Self {
+        Self::Bullet(text.into())
+    }
+
+    /// The games' author's credit.
+    pub(crate) fn author() -> Self {
+        Self::Credit("By", crate::text::AUTHOR.to_string())
+    }
 }
 
 /// A titled group of help lines.
@@ -48,13 +60,7 @@ pub(crate) struct HelpPage {
 
 /// A key as a chip: dark text on the accent colour.
 fn key_chip(key: &str) -> Span<'static> {
-    Span::styled(
-        format!(" {key} "),
-        Style::default()
-            .fg(Color::Black)
-            .bg(COLOR_ACCENT)
-            .add_modifier(Modifier::BOLD),
-    )
+    Span::styled(format!(" {key} "), black_on(COLOR_ACCENT))
 }
 
 /// Indent of a row's name and of a credit, and of a bullet's text.
@@ -83,9 +89,7 @@ fn column_widths(section: &HelpSection) -> (usize, usize) {
 /// Lays out one section for a column `width` cells wide.
 fn section_lines(section: &HelpSection, width: u16) -> Vec<Line<'static>> {
     let width = usize::from(width);
-    let heading = Style::default()
-        .fg(COLOR_ACCENT)
-        .add_modifier(Modifier::BOLD);
+    let heading = bold(COLOR_ACCENT);
     let rule = width.saturating_sub(section.title.chars().count() + 2);
     let mut lines = vec![Line::from(vec![
         Span::styled(section.title.to_string(), heading),
@@ -123,12 +127,7 @@ fn section_lines(section: &HelpSection, width: u16) -> Vec<Line<'static>> {
                 };
                 Line::from(vec![
                     Span::raw(" ".repeat(ROW_INDENT)),
-                    Span::styled(
-                        format!("{name:<name_width$}"),
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled(format!("{name:<name_width$}"), bold(Color::White)),
                     Span::raw(" ".repeat(COLUMN_GAP)),
                     Span::raw(desc),
                     Span::raw(" "),
@@ -269,12 +268,7 @@ pub(crate) fn draw_help_page(f: &mut Frame, page: &HelpPage) {
     };
 
     let header = Line::from(vec![
-        Span::styled(
-            format!("How to Play {}", page.game),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(format!("How to Play {}", page.game), bold(Color::White)),
         Span::styled(
             format!("  {}", page.tagline),
             Style::default().fg(Color::Gray),
@@ -323,11 +317,10 @@ pub(crate) fn draw_help_page(f: &mut Frame, page: &HelpPage) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::{render_buffer, screen_text};
 
     #[test]
     fn a_long_tagline_fits_its_box() {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
         let tagline = "a tagline longer than any line in the sections below it";
         let page = HelpPage {
             game: "Test",
@@ -337,22 +330,12 @@ mod tests {
                 lines: vec![HelpLine::Bullet(Line::from("short"))],
             }],
         };
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-        terminal.draw(|f| draw_help_page(f, &page)).unwrap();
-        let screen: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
+        let screen = screen_text(&render_buffer(120, 30, |f| draw_help_page(f, &page)));
         assert!(screen.contains(tagline), "the tagline was cut");
     }
 
     #[test]
     fn a_narrow_screen_wraps_the_page_instead_of_cutting_it() {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
         let long = "a rule long enough that it can't fit on one line of a phone's screen";
         let page = HelpPage {
             game: "Test",
@@ -368,15 +351,7 @@ mod tests {
                 },
             ],
         };
-        let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
-        terminal.draw(|f| draw_help_page(f, &page)).unwrap();
-        let screen: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect::<String>();
+        let screen = screen_text(&render_buffer(40, 30, |f| draw_help_page(f, &page)));
         // Every word of the long rule is there, and the section after it.
         for word in long.split(' ') {
             assert!(screen.contains(word), "'{word}' was cut");

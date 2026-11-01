@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::dict;
 pub use crate::dict::GameMode;
-use crate::save::{self, enum_name, parse_enum, Loaded, Notice, Saveable, SAVE_VERSION};
+use crate::save::{self, enum_name, Loaded, Notice, Saveable, SAVE_VERSION};
+use crate::text::GAME_OVER;
 
 /// Maximum number of guesses allowed in a standard Wordle game.
 pub const MAX_WORDLE_GUESSES: usize = 6;
@@ -56,23 +57,13 @@ impl Difficulty {
         }
     }
 
-    /// Cycles to the next difficulty level.
-    pub const fn next(self) -> Self {
-        match self {
-            Self::Easy => Self::Medium,
-            Self::Medium => Self::Hard,
-            Self::Hard => Self::Scrabble,
-            Self::Scrabble => Self::Insane,
-            Self::Insane => Self::Easy,
-        }
+    /// Cycles to the next one, in declaration order.
+    pub fn next(self) -> Self {
+        save::next_variant(&self)
     }
 }
 
-impl fmt::Display for Difficulty {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
+display_label!(Difficulty);
 
 impl FromStr for Difficulty {
     type Err = String;
@@ -105,7 +96,7 @@ impl fmt::Display for GuessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::GameOver => {
-                f.write_str("The current game is already over. Start a new game to play again.")
+                f.write_str(GAME_OVER)
             }
             Self::InvalidLength => {
                 f.write_str("Invalid guess: word must be exactly 5 letters long.")
@@ -176,12 +167,7 @@ impl ScratchState {
 }
 
 /// A Jotto or Wordle save file (see [`crate::save`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SavedGame {
-    pub version: u32,
-    /// The unfinished game, if any.
-    pub game: Option<SavedPlay>,
-}
+pub type SavedGame = save::SavedGames<SavedPlay>;
 
 /// An unfinished Jotto or Wordle game, replayed on load.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,7 +192,6 @@ pub struct GameState {
     difficulty: Difficulty,
     daily_date: Option<String>,
     history: Vec<Round>,
-    used_letters: [bool; 26],
     letter_states: [Option<LetterState>; 26],
     scratched_letters: [ScratchState; 26],
     played_words: HashSet<String>,
@@ -246,7 +231,6 @@ impl GameState {
             difficulty,
             daily_date: None,
             history: Vec::new(),
-            used_letters: [false; 26],
             letter_states: [None; 26],
             scratched_letters: [ScratchState::Default; 26],
             played_words,
@@ -270,7 +254,6 @@ impl GameState {
             difficulty: Difficulty::Scrabble,
             daily_date: Some(date_str),
             history: Vec::new(),
-            used_letters: [false; 26],
             letter_states: [None; 26],
             scratched_letters: [ScratchState::Default; 26],
             played_words,
@@ -298,11 +281,7 @@ impl GameState {
         self.played_words.insert(word.to_string());
         self.secret_word = word.to_string();
         self.daily_date = None;
-        self.history.clear();
-        self.used_letters = [false; 26];
-        self.letter_states = [None; 26];
-        self.scratched_letters = [ScratchState::Default; 26];
-        self.status = GameStatus::Playing;
+        self.clear_board();
     }
 
     /// Starts or resets to today's deterministic UTC daily word (always using the Scrabble `80` word list).
@@ -312,11 +291,7 @@ impl GameState {
         self.played_words.insert(word.to_string());
         self.secret_word = word.to_string();
         self.daily_date = Some(date_str);
-        self.history.clear();
-        self.used_letters = [false; 26];
-        self.letter_states = [None; 26];
-        self.scratched_letters = [ScratchState::Default; 26];
-        self.status = GameStatus::Playing;
+        self.clear_board();
     }
 
     /// Returns the game mode (`Jotto` or `Wordle`).
@@ -364,9 +339,17 @@ impl GameState {
         &self.history
     }
 
-    /// Returns the boolean array of used letters `a..=z`.
-    pub fn used_letters(&self) -> &[bool; 26] {
-        &self.used_letters
+    /// Which letters `a..=z` have been guessed: those with a Wordle state.
+    pub fn used_letters(&self) -> [bool; 26] {
+        self.letter_states.map(|state| state.is_some())
+    }
+
+    /// Clears the guesses, and what they've shown, for a new game.
+    fn clear_board(&mut self) {
+        self.history.clear();
+        self.letter_states = [None; 26];
+        self.scratched_letters = [ScratchState::Default; 26];
+        self.status = GameStatus::Playing;
     }
 
     /// Returns the highest-priority Wordle feedback state (`Correct` > `Present` > `Absent`)
@@ -481,8 +464,7 @@ impl GameState {
         let Some(play) = &saved.game else {
             return Ok(None);
         };
-        let difficulty = parse_enum(&play.difficulty)
-            .ok_or_else(|| format!("unknown difficulty '{}'", play.difficulty))?;
+        let difficulty = save::saved_difficulty(&play.difficulty)?;
         let mut game = Self::new_with_mode(mode, difficulty, Some(&play.secret))
             .map_err(|e| format!("its word no longer works ({e})"))?;
         game.daily_date = play.daily_date.clone();
@@ -526,7 +508,6 @@ impl GameState {
         for (b, &state) in guess.bytes().zip(letter_states.iter()) {
             if b.is_ascii_lowercase() {
                 let idx = (b - b'a') as usize;
-                self.used_letters[idx] = true;
                 self.letter_states[idx] =
                     Some(self.letter_states[idx].map_or(state, |prev| prev.max(state)));
             }

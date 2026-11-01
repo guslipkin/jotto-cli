@@ -52,12 +52,12 @@ Flights asks you to get from one airport to another by the shortest distance:
 - **Fresh SCOWL Dictionary at Build Time**:
   - Pulls the latest word lists directly from [`en-wl/wordlist`](https://github.com/en-wl/wordlist) during `cargo build` via `build.rs` and embeds a single compact dictionary shared by Jotto and Wordle.
 - **Offline Word Meanings (Contexto)**:
-  - `data/contexto.bin` (~18 MB, embedded in the `contexto` binary) holds its word list and a 300-dimension [GloVe](https://nlp.stanford.edu/projects/glove/) vector per word, so ranking needs no network. It's committed rather than built, since GloVe is an 822 MB download; see [Updating the Contexto data](#updating-the-contexto-data).
+  - `data/contexto.bin` (~18 MB, embedded in the `contexto` binary, its word lists deflated) holds its word list and a 300-dimension [GloVe](https://nlp.stanford.edu/projects/glove/) vector per word, so ranking needs no network. It's committed rather than built, since GloVe is an 822 MB download; see [Updating the Contexto data](#updating-the-contexto-data).
 - **Offline Airports & Routes (Flights)**:
-  - `data/flights.tsv` (~1 MB of text, embedded in the `flights` binary deflated to ~380 KB) holds every airport and hop the game uses, scraped from Wikipedia's airport articles, and `data/coastlines.bin` (~1.9 MB) holds [Natural Earth](https://www.naturalearthdata.com/)'s coastlines at three scales, so the map stays sharp as you zoom in; see [Updating the Flights data](#updating-the-flights-data).
+  - `data/flights.tsv` (~1 MB of text, embedded in the `flights` binary deflated to ~380 KB) holds every airport and hop the game uses, scraped from Wikipedia's airport articles, and `data/coastlines.bin` (~1.9 MB, deflated to ~1.5 MB) holds [Natural Earth](https://www.naturalearthdata.com/)'s coastlines at three scales, so the map stays sharp as you zoom in; see [Updating the Flights data](#updating-the-flights-data).
 - **Saved Games**: Quit mid-game and the next launch picks up where you left off (see [Saved games](#saved-games)).
 - **Minimal Dependencies**:
-  - Only 7 direct dependencies (`ratatui`, `crossterm`, `clap`, `fastrand`, `serde` / `serde_json` for saved games, and `miniz_oxide` to unpack the Flights data).
+  - Only 7 direct dependencies (`ratatui`, `crossterm`, `clap`, `fastrand`, `serde` / `serde_json` for saved games, and `miniz_oxide` to unpack the embedded data `build.rs` deflates).
 
 ## Installation
 

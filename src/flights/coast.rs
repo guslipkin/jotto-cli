@@ -9,25 +9,40 @@ use ratatui::style::Color;
 use ratatui::widgets::canvas::{Line as CanvasLine, Painter, Shape};
 
 /// Committed rather than built by `build.rs`, since building it downloads
-/// Natural Earth's coastlines.
-static DATA: &[u8] = include_bytes!("../../data/coastlines.bin");
+/// Natural Earth's coastlines; `build.rs` only deflates it.
+static DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/coastlines.bin.deflate"));
 
 const MAGIC: &[u8; 4] = b"CST1";
 
 /// A map view or box: `(lon_min, lon_max, lat_min, lat_max)`.
 pub type Bounds = (f64, f64, f64, f64);
 
-/// One coastline, as `(lon, lat)` points, with the box around it so lines off
-/// the view can be skipped whole.
+/// One coastline, with the box around it so lines off the view can be skipped
+/// whole. Its points are kept as the file's whole `(lon, lat)` steps of
+/// `1 / per_degree` degrees, half the memory of floats, and turned into degrees
+/// as they're drawn.
 pub struct Coastline {
-    pub points: Vec<(f64, f64)>,
+    points: Vec<(i32, i32)>,
+    per_degree: f64,
     pub bbox: Bounds,
+}
+
+impl Coastline {
+    /// The line's points in degrees, `(lon, lat)`.
+    pub fn points(&self) -> impl ExactSizeIterator<Item = (f64, f64)> + Clone + '_ {
+        self.points.iter().map(|&(x, y)| {
+            (
+                f64::from(x) / self.per_degree,
+                f64::from(y) / self.per_degree,
+            )
+        })
+    }
 }
 
 /// Every scale's coastlines, coarsest (1:110m) first, parsed on first use.
 fn scales() -> &'static [Vec<Coastline>] {
     static SCALES: OnceLock<Vec<Vec<Coastline>>> = OnceLock::new();
-    SCALES.get_or_init(|| parse(DATA))
+    SCALES.get_or_init(|| parse(&crate::inflate(DATA, "coastlines.bin")))
 }
 
 fn parse(data: &[u8]) -> Vec<Vec<Coastline>> {
@@ -54,17 +69,21 @@ fn parse(data: &[u8]) -> Vec<Vec<Coastline>> {
                     let n = u32_at(take(4)) as usize;
                     let (mut x, mut y) = (i32_at(take(4)), i32_at(take(4)));
                     let mut points = Vec::with_capacity(n);
-                    points.push((f64::from(x) / per_degree, f64::from(y) / per_degree));
+                    points.push((x, y));
                     for _ in 1..n {
                         x += i32::from(i16_at(take(2)));
                         y += i32::from(i16_at(take(2)));
-                        points.push((f64::from(x) / per_degree, f64::from(y) / per_degree));
+                        points.push((x, y));
                     }
-                    let bbox = points.iter().fold(
-                        (f64::MAX, f64::MIN, f64::MAX, f64::MIN),
-                        |(x0, x1, y0, y1), &(x, y)| (x0.min(x), x1.max(x), y0.min(y), y1.max(y)),
-                    );
-                    Coastline { points, bbox }
+                    let mut line = Coastline {
+                        points,
+                        per_degree,
+                        bbox: (f64::MAX, f64::MIN, f64::MAX, f64::MIN),
+                    };
+                    line.bbox = line.points().fold(line.bbox, |(x0, x1, y0, y1), (x, y)| {
+                        (x0.min(x), x1.max(x), y0.min(y), y1.max(y))
+                    });
+                    line
                 })
                 .collect()
         })
@@ -143,8 +162,8 @@ impl Shape for Coast<'_> {
             if bx1 < x0 || bx0 > x1 || by1 < y0 || by0 > y1 {
                 continue;
             }
-            for w in line.points.windows(2) {
-                if let Some(((ax, ay), (bx, by))) = clip(w[0], w[1], self.bounds) {
+            for (a, b) in line.points().zip(line.points().skip(1)) {
+                if let Some(((ax, ay), (bx, by))) = clip(a, b, self.bounds) {
                     CanvasLine::new(ax, ay, bx, by, self.color).draw(painter);
                 }
             }
