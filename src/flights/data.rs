@@ -31,6 +31,27 @@ const PUZZLE_ATTEMPTS: usize = 10_000;
 /// Random ends tried from each start.
 const END_ATTEMPTS: usize = 8;
 
+/// The hops a puzzle's shortest route may take: at least `min`, at most `max`
+/// (`None`: no limit). A bare `Option<usize>` is a limit on the most alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HopRange {
+    pub min: usize,
+    pub max: Option<usize>,
+}
+
+impl HopRange {
+    /// Whether a shortest route of `hops` hops is in range.
+    pub fn contains(self, hops: usize) -> bool {
+        hops >= self.min && self.max.is_none_or(|max| hops <= max)
+    }
+}
+
+impl From<Option<usize>> for HopRange {
+    fn from(max: Option<usize>) -> Self {
+        Self { min: 0, max }
+    }
+}
+
 /// One move: a ticket from an airport to one whose code is one letter different,
 /// direct or with connections (the shortest itinerary of up to three flights).
 #[derive(Debug, Clone, PartialEq)]
@@ -507,11 +528,11 @@ impl Network {
             .any(|w| !self.bridges.contains(&(w[0].min(w[1]), w[0].max(w[1]))))
     }
 
-    /// Every airport that makes a puzzle with `start` within `max_hops` (any
-    /// number for `None`), in index order. One shortest-route search from `start`
+    /// Every airport that makes a puzzle with `start` in `hops`, in index order. One shortest-route search from `start`
     /// settles them all, carrying along each route's hops and whether it has
     /// crossed a non-bridge hop, as `scripts/build-flights-data.py` counts them.
-    pub fn puzzle_ends(&self, start: usize, max_hops: Option<usize>) -> Vec<usize> {
+    pub fn puzzle_ends(&self, start: usize, hops: impl Into<HopRange>) -> Vec<usize> {
+        let range = hops.into();
         let n = self.len();
         let mut hops = vec![0usize; n];
         let mut two = vec![false; n];
@@ -525,7 +546,7 @@ impl Network {
                 dist[end].is_finite()
                     && two[end]
                     && letters_apart(code, self.code(end)) == 3
-                    && max_hops.is_none_or(|max| hops[end] <= max)
+                    && range.contains(hops[end])
             })
             .collect()
     }
@@ -535,12 +556,13 @@ impl Network {
         self.shortest(start, end).map(|(_, path)| path.len() - 1)
     }
 
-    /// Number of valid puzzles whose shortest route has at most `max_hops` hops
-    /// (all of them for `None`), from the counts in the data file.
-    pub fn puzzle_count(&self, max_hops: Option<usize>) -> usize {
+    /// Number of valid puzzles whose shortest route's hops are in `hops`, from
+    /// the counts in the data file.
+    pub fn puzzle_count(&self, hops: impl Into<HopRange>) -> usize {
+        let range = hops.into();
         self.puzzle_counts
             .iter()
-            .filter(|&&(hops, _)| max_hops.is_none_or(|max| hops <= max))
+            .filter(|&&(hops, _)| range.contains(hops))
             .map(|&(_, count)| count)
             .sum()
     }
@@ -551,15 +573,30 @@ impl Network {
         letters_apart(self.code(start), self.code(end)) == 3 && self.has_two_routes(start, end)
     }
 
-    /// A random puzzle whose shortest route has at most `max_hops` hops (any
-    /// number for `None`): a random start, then a random end among the airports it
-    /// can reach in that many hops. Drawn fresh each time rather than from a
-    /// precomputed list, since the pairs number in the millions.
+    /// A random puzzle whose shortest route's hops are in `hops`: a random start,
+    /// then a random end among the airports it can reach in that many hops. Drawn
+    /// fresh each time rather than from a precomputed list, since the pairs
+    /// number in the millions.
     pub fn random_puzzle(
         &self,
         rng: &mut fastrand::Rng,
-        max_hops: Option<usize>,
+        hops: impl Into<HopRange>,
     ) -> Option<(usize, usize)> {
+        let range = hops.into();
+        // Every puzzle takes at least 3 hops, so a higher minimum rules out most
+        // ends near a start; one search from each start then finds the far ones,
+        // rather than many searches each trying a random end that's too close.
+        if range.min > 3 {
+            let mut starts: Vec<usize> = (0..self.len())
+                .filter(|&i| !self.adj[i].is_empty())
+                .collect();
+            rng.shuffle(&mut starts);
+            return starts.into_iter().find_map(|start| {
+                let ends = self.puzzle_ends(start, range);
+                (!ends.is_empty()).then(|| (start, ends[rng.usize(0..ends.len())]))
+            });
+        }
+        let max_hops = range.max;
         for _ in 0..PUZZLE_ATTEMPTS {
             let start = rng.usize(0..self.len());
             if self.adj[start].is_empty() {
@@ -610,11 +647,11 @@ impl Network {
 
     /// The puzzle for a UTC day (days since 1970-01-01), the same for everyone on
     /// the same build.
-    pub fn daily_puzzle(&self, utc_day: u64, max_hops: Option<usize>) -> Option<(usize, usize)> {
+    pub fn daily_puzzle(&self, utc_day: u64, hops: impl Into<HopRange>) -> Option<(usize, usize)> {
         let day = utc_day.saturating_sub(DAILY_EPOCH_DAY);
         let mut rng =
             fastrand::Rng::with_seed(DAILY_SEED ^ day.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        self.random_puzzle(&mut rng, max_hops)
+        self.random_puzzle(&mut rng, hops)
     }
 
     /// Airports reachable from `start` in at most `max_hops` hops (any number for

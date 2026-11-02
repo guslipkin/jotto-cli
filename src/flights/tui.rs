@@ -12,12 +12,12 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::flights::coast::{self, clip, Bounds, Coast};
+use crate::flights::coast::{self, clip, turns, wrap_lon, Bounds, Coast};
 use crate::flights::data::{Ticket, MAX_CONNECTIONS};
 use crate::flights::game::SavedGame;
 use crate::flights::game::{
     code_str, parse_code, Code, Difficulty, FlightOption, FlightsGame, FlyOutcome, Rules, Status,
-    Units, MAX_HOPS, MIN_HOPS,
+    Units, View, MAX_HOPS, MIN_HOPS,
 };
 use crate::game::supports_color;
 use crate::help::{draw_help_page, HelpLine, HelpPage, HelpSection};
@@ -73,7 +73,7 @@ const YOU_LEFT: &str = "↑ you left here";
 const WENT_HERE: &str = "↑ went here";
 const NEXT_HOP: &str = "↑ next hop";
 /// Indent of a stop's second line, under its code.
-const INDENT: &str = "     ";
+const INDENT: &str = "      ";
 
 /// Width of the column beside the map: the longest line it can ever show for
 /// these rules, worked out once so the column never changes width (not even
@@ -95,8 +95,8 @@ fn side_width(rules: Rules) -> u16 {
     let option_distance = if rules.shows_distances() { DISTANCE } else { 0 };
     // "> " + "LAS★" + columns.
     let option = 2 + 5 + option_distance + via + if place > 0 { place + 2 } else { 0 };
-    // " → LAS" + distance + via, then the indent, remark and " · " place.
-    let first = 6 + DISTANCE + via;
+    // "12. LAS" + distance + via, then the indent, remark and " · " place.
+    let first = 7 + DISTANCE + via;
     let remark = [YOU_LEFT, WENT_HERE, NEXT_HOP]
         .map(count)
         .into_iter()
@@ -161,6 +161,10 @@ struct FlightsApp {
     /// Where the route box was last drawn, how far it was scrolled and how far
     /// it could be (set while drawing, hence a `Cell`).
     route_frame: StdCell<(Rect, u16, u16)>,
+    /// Once the game is over, the hop picked in the route box with Up / Down
+    /// and shown on the map: counted through the player's route, then after
+    /// giving up on through the shortest. `None` shows the routes whole.
+    route_step: Option<usize>,
 }
 
 /// How much one zoom key press narrows the view.
@@ -174,41 +178,65 @@ const PAN_STEP: f64 = 0.2;
 const MIN_VIEW_LAT: f64 = 0.5;
 const MAX_VIEW_LAT: f64 = 200.0;
 
+/// Inside width of the settings page: a row's marker, name and value (35), its
+/// longest note ("airports may repeat as connections", 34) and a space before
+/// the border, so no row wraps and the page keeps one width whatever's chosen.
+const SETTINGS_WIDTH: u16 = 70;
+
+/// How many of [`SETTINGS`]' rows, from the top, are the player's own
+/// preferences rather than the custom game's.
+const PREFERENCE_ROWS: usize = 2;
+
 /// A row of the settings page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Setting {
     Units,
+    /// The map's hops: straight, or great circle curves.
+    Lines,
+    /// A preset: sets the four parts of the view below it as a level does.
     View,
+    Map,
+    Distances,
+    Via,
+    Over,
     Places,
     Mode,
     Connections,
     Reuse,
-    Hops,
+    MinHops,
+    MaxHops,
     Start,
     End,
     /// Not a setting: puts the custom ones back to their defaults.
     Reset,
 }
 
-const SETTINGS: [Setting; 10] = [
+const SETTINGS: [Setting; 16] = [
     Setting::Units,
+    Setting::Lines,
     Setting::View,
+    Setting::Map,
+    Setting::Distances,
+    Setting::Via,
+    Setting::Over,
     Setting::Places,
     Setting::Mode,
     Setting::Connections,
     Setting::Reuse,
-    Setting::Hops,
+    Setting::MinHops,
+    Setting::MaxHops,
     Setting::Start,
     Setting::End,
     Setting::Reset,
 ];
 
-/// The settings page: a copy of the units and custom settings being edited, kept
-/// whenever the page closes, and the row selected.
+/// The settings page: a copy of the preferences and custom settings being
+/// edited, kept whenever the page closes, and the row selected.
 #[derive(Debug, Clone)]
 struct SettingsPage {
     row: usize,
     units: Units,
+    curves: bool,
     custom: Rules,
     /// The start and end codes as typed so far (empty: random). Kept apart from
     /// `custom` until they're whole codes.
@@ -225,7 +253,7 @@ struct SettingsPage {
 }
 
 impl SettingsPage {
-    fn new(units: Units, custom: Rules) -> Self {
+    fn new(units: Units, curves: bool, custom: Rules) -> Self {
         let text = |c: &Option<Code>| {
             c.as_ref()
                 .map_or(String::new(), |c| code_str(c).to_string())
@@ -233,6 +261,7 @@ impl SettingsPage {
         Self {
             row: 0,
             units,
+            curves,
             start_text: text(&custom.start),
             end_text: text(&custom.end),
             status: custom.check(),
@@ -242,10 +271,11 @@ impl SettingsPage {
         }
     }
 
-    /// Puts the custom settings back to their defaults (the units aren't one).
+    /// Puts the custom settings back to their defaults (the preferences above
+    /// them aren't any).
     fn reset(&mut self) {
         let row = self.row;
-        *self = Self::new(self.units, Rules::default());
+        *self = Self::new(self.units, self.curves, Rules::default());
         self.row = row;
     }
 
@@ -253,7 +283,7 @@ impl SettingsPage {
     /// limits, a fixed route its start and end.
     fn enabled(&self, setting: Setting) -> bool {
         match setting {
-            Setting::Connections | Setting::Hops => !self.custom.fixed_route,
+            Setting::Connections | Setting::MinHops | Setting::MaxHops => !self.custom.fixed_route,
             Setting::Start | Setting::End => self.custom.fixed_route,
             // Without connections there's nothing to reuse.
             Setting::Reuse => self.custom.connections() > 0,
@@ -329,18 +359,40 @@ impl SettingsPage {
                 let i = all.iter().position(|&u| u == self.units).unwrap_or(0);
                 self.units = all[step(i, all.len())];
             }
+            Setting::Lines => self.curves = !self.curves,
             Setting::View => {
                 let all = Difficulty::STANDARD;
-                let i = all.iter().position(|&d| d == c.view).unwrap_or(0);
-                c.view = all[step(i, all.len())];
+                // A mixed view steps to the first level, or back to the last.
+                let next = match c
+                    .view
+                    .level()
+                    .and_then(|l| all.iter().position(|&d| d == l))
+                {
+                    Some(i) => step(i, all.len()),
+                    None if forward => 0,
+                    None => all.len() - 1,
+                };
+                c.view = View::of(all[next]);
             }
+            Setting::Map => c.view.map = !c.view.map,
+            Setting::Distances => c.view.distances = !c.view.distances,
+            Setting::Via => c.view.connections = !c.view.connections,
+            Setting::Over => c.view.amount_over = !c.view.amount_over,
             Setting::Connections => {
                 c.max_connections = step(c.max_connections, MAX_CONNECTIONS + 1);
             }
-            Setting::Hops => {
-                // MIN_HOPS..=MAX_HOPS, then no limit, wrapping around.
+            // Each limit steps only as far as the other allows, wrapping round,
+            // so the least is never more than the most.
+            Setting::MinHops => {
+                let top = c.max_hops.unwrap_or(MAX_HOPS);
+                let choices: Vec<usize> = (MIN_HOPS..=top).collect();
+                let i = choices.iter().position(|&h| h == c.min_hops).unwrap_or(0);
+                c.min_hops = choices[step(i, choices.len())];
+            }
+            Setting::MaxHops => {
+                // The least up to MAX_HOPS, then no limit.
                 let choices: Vec<Option<usize>> =
-                    (MIN_HOPS..=MAX_HOPS).map(Some).chain([None]).collect();
+                    (c.min_hops..=MAX_HOPS).map(Some).chain([None]).collect();
                 let i = choices.iter().position(|&h| h == c.max_hops).unwrap_or(0);
                 c.max_hops = choices[step(i, choices.len())];
             }
@@ -381,6 +433,7 @@ impl FlightsApp {
             drag: None,
             route_scroll: None,
             route_frame: StdCell::new((Rect::default(), 0, 0)),
+            route_step: None,
             should_quit: false,
             options_state: TableState::default(),
         };
@@ -392,6 +445,7 @@ impl FlightsApp {
         // Called on every change to the route but going back (which keeps the
         // selection, and drops the scroll itself), so the box shows its new end.
         self.route_scroll = None;
+        self.route_step = None;
         let any = !self.game.options().is_empty();
         self.options_state = TableState::default().with_selected(any.then_some(0));
     }
@@ -516,7 +570,11 @@ impl FlightsApp {
     }
 
     fn open_settings(&mut self) {
-        self.settings = Some(SettingsPage::new(self.game.units(), self.game.custom()));
+        self.settings = Some(SettingsPage::new(
+            self.game.units(),
+            self.game.curves(),
+            self.game.custom(),
+        ));
     }
 
     /// Keeps the settings page's choices and closes it; with `play`, starts a
@@ -526,6 +584,7 @@ impl FlightsApp {
             return;
         };
         self.game.set_units(page.units);
+        self.game.set_curves(page.curves);
         self.game.set_custom(page.custom);
         if !play {
             self.message = ("Settings saved.".to_string(), COLOR_ACCENT);
@@ -593,8 +652,48 @@ impl FlightsApp {
         );
     }
 
+    /// Moves the selection: through the options while playing, and once the
+    /// game is over (when there are none) through the route's hops.
     fn move_selection(&mut self, down: bool) {
-        step_selection(&mut self.options_state, self.game.options().len(), down);
+        if self.game.status() == Status::Playing {
+            step_selection(&mut self.options_state, self.game.options().len(), down);
+            return;
+        }
+        let Some(last) = self.step_count().checked_sub(1) else {
+            return;
+        };
+        self.route_step = Some(match self.route_step {
+            None if down => 0,
+            None => last,
+            Some(i) if down => (i + 1).min(last),
+            Some(i) => i.saturating_sub(1),
+        });
+        // Scrolled to the picked hop rather than where the player left it.
+        self.route_scroll = None;
+    }
+
+    /// How many hops the finished game's route box steps through.
+    fn step_count(&self) -> usize {
+        let best = if self.game.status() == Status::GivenUp {
+            self.game.best_legs().len()
+        } else {
+            0
+        };
+        self.game.legs().len() + best
+    }
+
+    /// The hop picked in the finished game's route box: where it's from, its
+    /// ticket and where it's to.
+    fn selected_hop(&self) -> Option<(usize, &Ticket, usize)> {
+        let step = self.route_step?;
+        let game = &self.game;
+        let yours = game.legs().len();
+        let (route, legs, n) = if step < yours {
+            (game.route(), game.legs(), step)
+        } else {
+            (game.best_route(), game.best_legs(), step - yours)
+        };
+        Some((route[n], legs.get(n)?, *route.get(n + 1)?))
     }
 
     fn execute_footer_action(&mut self, action: FooterAction) {
@@ -1008,6 +1107,8 @@ fn draw_header(f: &mut Frame, app: &FlightsApp, title: &'static str, area: Rect)
 /// same and the column beside the map is sized for it (see [`side_width`]).
 /// With a line of its own, the place is cut only where it would pass the box's
 /// edge (`width`). `legs` are its hops' tickets; `style(airport)` colours a code.
+/// Each hop is numbered, so the count matches the header's hops; the start isn't
+/// a hop and goes unnumbered. Also returns which line each hop starts on.
 fn route_lines(
     game: &FlightsGame,
     route: &[usize],
@@ -1015,7 +1116,7 @@ fn route_lines(
     width: usize,
     style: &dyn Fn(usize) -> Style,
     note: &dyn Fn(usize) -> Option<Span<'static>>,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<usize>) {
     let net = game.network();
     let units = game.units();
     let gray = Style::default().fg(Color::Gray);
@@ -1040,8 +1141,9 @@ fn route_lines(
             lines.push(Line::from(spans));
         }
     };
+    let mut starts = Vec::new();
     lines.push(Line::from(vec![
-        Span::raw("   "),
+        Span::raw("    "),
         Span::styled(net.code(route[0]).to_string(), style(route[0])),
         Span::styled("  start", gray),
     ]));
@@ -1052,7 +1154,7 @@ fn route_lines(
             .bytes()
             .zip(net.code(w[1]).bytes())
             .position(|(a, b)| a != b);
-        let mut spans = vec![Span::styled(" → ", gray)];
+        let mut spans = vec![Span::styled(format!("{:>2}. ", n + 1), gray)];
         spans.extend(code_spans(net.code(w[1]), changed, style(w[1])));
         if game.distances_visible() {
             spans.push(Span::styled(
@@ -1063,10 +1165,11 @@ fn route_lines(
         if game.rules().shows_connections() {
             spans.push(Span::styled(via_suffix(net, &hop.via), dark));
         }
+        starts.push(lines.len());
         lines.push(Line::from(spans));
         second(&mut lines, w[1], n + 1);
     }
-    lines
+    (lines, starts)
 }
 
 fn draw_route(f: &mut Frame, app: &FlightsApp, area: Rect) {
@@ -1092,7 +1195,7 @@ fn draw_route(f: &mut Frame, app: &FlightsApp, area: Rect) {
     let no_note = |_: usize| None;
     // Inside the box's borders.
     let width = usize::from(area.width.saturating_sub(2));
-    let mut lines = route_lines(
+    let (mut lines, mut step_lines) = route_lines(
         game,
         game.route(),
         game.legs(),
@@ -1112,14 +1215,16 @@ fn draw_route(f: &mut Frame, app: &FlightsApp, area: Rect) {
             format!("Yours{}", total(game.total_distance())),
             bold(COLOR_ACCENT),
         ))];
-        lines.extend(route_lines(
+        let (yours, starts) = route_lines(
             game,
             game.route(),
             game.legs(),
             width,
             &code_style,
             &left_note,
-        ));
+        );
+        step_lines = starts.iter().map(|&i| i + 1).collect();
+        lines.extend(yours);
         lines.push(Line::from(Span::styled(
             format!("Shortest{}", total(game.best_distance())),
             bold(COLOR_POSITIVE),
@@ -1140,20 +1245,17 @@ fn draw_route(f: &mut Frame, app: &FlightsApp, area: Rect) {
                 Span::styled(text, bold(COLOR_POSITIVE))
             })
         };
-        lines.extend(route_lines(
-            game,
-            best,
-            game.best_legs(),
-            width,
-            &best_style,
-            &here_note,
-        ));
+        let (shortest, starts) =
+            route_lines(game, best, game.best_legs(), width, &best_style, &here_note);
+        let offset = lines.len();
+        step_lines.extend(starts.iter().map(|&i| i + offset));
+        lines.extend(shortest);
         scroll_to_end = false;
     } else if !game.at_destination() {
         let net = game.network();
         let text = net.place(game.destination());
         lines.push(Line::from(vec![
-            Span::styled(" … ", Style::default().fg(Color::Gray)),
+            Span::styled("  … ", Style::default().fg(Color::Gray)),
             Span::styled(game.end_code(), bold(COLOR_DESTINATION)),
             Span::styled("  destination", Style::default().fg(Color::Gray)),
         ]));
@@ -1176,22 +1278,45 @@ fn draw_route(f: &mut Frame, app: &FlightsApp, area: Rect) {
         ),
         Status::GivenUp => " Game over · [^N] New Game ".to_string(),
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let inner_height = block.inner(area).height;
-    let mut paragraph = Paragraph::new(lines);
-    if !scroll_to_end {
-        // After giving up, long lines wrap so every stop's place shows.
-        paragraph = paragraph.wrap(Wrap { trim: false });
+    let mut block = Block::default().borders(Borders::ALL).title(title);
+    if game.status() != Status::Playing && app.step_count() > 0 {
+        block = block.title_bottom(Line::from(" [↑↓] each hop ").right_aligned());
     }
-    let max = u16::try_from(paragraph.line_count(area.width.saturating_sub(2)))
-        .unwrap_or(u16::MAX)
-        .saturating_sub(inner_height);
+    let inner_height = block.inner(area).height;
+    // The picked hop's line, highlighted as an option is while playing.
+    let picked = app.route_step.and_then(|i| step_lines.get(i).copied());
+    if let Some(i) = picked {
+        lines[i].style = Style::default().bg(HIGHLIGHT_BG);
+    }
+    // After giving up, long lines wrap so every stop's place shows.
+    let wrap = |paragraph: Paragraph<'static>| {
+        if scroll_to_end {
+            paragraph
+        } else {
+            paragraph.wrap(Wrap { trim: false })
+        }
+    };
+    let line_count = |lines: &[Line<'static>]| {
+        u16::try_from(wrap(Paragraph::new(lines.to_vec())).line_count(area.width.saturating_sub(2)))
+            .unwrap_or(u16::MAX)
+    };
+    let max = line_count(&lines).saturating_sub(inner_height);
     // While playing, the end of the route stays in view; after giving up, both
-    // routes show from the top. Either way, until the player scrolls.
+    // routes show from the top. Either way, until the player scrolls, and
+    // moved only as far as it takes to show a picked hop.
+    let usual = if scroll_to_end { max } else { 0 };
     let scroll = app
         .route_scroll
-        .unwrap_or(if scroll_to_end { max } else { 0 })
+        .unwrap_or_else(|| match picked {
+            Some(i) => {
+                let top = line_count(&lines[..i]);
+                let bottom = line_count(&lines[..=i]);
+                usual.min(top).max(bottom.saturating_sub(inner_height))
+            }
+            None => usual,
+        })
         .min(max);
+    let paragraph = wrap(Paragraph::new(lines));
     app.route_frame.set((area, scroll, max));
     f.render_widget(paragraph.scroll((scroll, 0)).block(block), area);
 }
@@ -1306,17 +1431,32 @@ fn status_height(app: &FlightsApp, column: Rect, least: u16) -> Constraint {
 /// Map bounds `(lon_min, lon_max, lat_min, lat_max)` fitting `points` with padding,
 /// widened so a degree of longitude and of latitude look the same length in a
 /// `cols` by `rows` area of braille (each cell is about twice as tall as wide).
-/// A spread crossing the antimeridian falls back to the whole width of the world,
-/// since the coastline data stops at ±180°.
+/// The map goes round, so the longitudes covered are the narrowest arc holding
+/// every point: a route across the Pacific is centred on it, not stretched over
+/// the whole world. Its ends can pass ±180°.
 fn map_bounds(points: &[(f64, f64)], cols: u16, rows: u16) -> (f64, f64, f64, f64) {
     let lat_min = points.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
     let lat_max = points.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
-    let mut lon_min = points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
-    let mut lon_max = points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
-    if lon_max - lon_min > 180.0 {
-        lon_min = -180.0;
-        lon_max = 180.0;
-    }
+    // The arc starts just past the widest gap between neighbouring longitudes,
+    // counting the gap from the last round to the first.
+    let mut lons: Vec<f64> = points.iter().map(|p| p.1).collect();
+    lons.sort_by(f64::total_cmp);
+    let (lon_min, lon_max) = match (lons.first(), lons.last()) {
+        (Some(&first), Some(&last)) => {
+            let (gap, start) = lons.windows(2).map(|w| (w[1] - w[0], w[1])).fold(
+                (first + 360.0 - last, first),
+                |best, next| {
+                    if next.0 > best.0 {
+                        next
+                    } else {
+                        best
+                    }
+                },
+            );
+            (start, start + 360.0 - gap)
+        }
+        _ => (-180.0, 180.0),
+    };
     let mid_lat = (lat_min + lat_max) / 2.0;
     let mid_lon = (lon_min + lon_max) / 2.0;
     let lat_scale = mid_lat.to_radians().cos().max(0.2);
@@ -1408,6 +1548,8 @@ impl MapLabels {
 
     /// Labels the airport at canvas point (`x`, `y`) with `code` in `style`.
     fn add(&mut self, x: f64, y: f64, code: &str, style: Style, dot: Color) {
+        // The copy of the airport nearest the view's middle, past ±180° if need be.
+        let x = wrap_lon(x, (self.bounds.0 + self.bounds.1) / 2.0);
         let Some((col, row)) = self.cell(x, y) else {
             return;
         };
@@ -1447,6 +1589,52 @@ impl MapLabels {
     }
 }
 
+/// Degrees of arc between the points a curved hop is drawn through: fine
+/// enough to look smooth at any zoom the map allows for a hop that long.
+const CURVE_STEP: f64 = 1.0;
+
+/// The points (`(lon, lat)`) a leg from `a` to `b` is drawn through: its ends,
+/// for a straight line, or with `curved`, points along the great circle
+/// between them, the way the flight goes. Either way it goes the short way
+/// round, its longitudes running on from `a`'s past ±180° where it crosses the
+/// antimeridian, so the line never jumps across the map.
+fn leg_points(a: (f64, f64), b: (f64, f64), curved: bool) -> Vec<(f64, f64)> {
+    let straight = vec![a, (wrap_lon(b.0, a.0), b.1)];
+    if !curved {
+        return straight;
+    }
+    let unit = |(lon, lat): (f64, f64)| {
+        let (lon, lat) = (lon.to_radians(), lat.to_radians());
+        [lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin()]
+    };
+    let (p, q) = (unit(a), unit(b));
+    let angle = (0..3)
+        .map(|i| p[i] * q[i])
+        .sum::<f64>()
+        .clamp(-1.0, 1.0)
+        .acos();
+    // The same place, or opposite sides of the world (where every great circle
+    // through one passes the other): no one curve to draw.
+    if angle < 1e-9 || std::f64::consts::PI - angle < 1e-9 {
+        return straight;
+    }
+    let steps = (angle.to_degrees() / CURVE_STEP).ceil() as usize;
+    let mut points = vec![a];
+    for k in 1..=steps {
+        // Spherical interpolation: the point a fraction `t` of the way along.
+        let t = k as f64 / steps as f64;
+        let (wa, wb) = (
+            ((1.0 - t) * angle).sin() / angle.sin(),
+            (t * angle).sin() / angle.sin(),
+        );
+        let r: [f64; 3] = std::array::from_fn(|i| wa * p[i] + wb * q[i]);
+        let lat = r[2].clamp(-1.0, 1.0).asin().to_degrees();
+        let prev = points[points.len() - 1].0;
+        points.push((wrap_lon(r[1].atan2(r[0]).to_degrees(), prev), lat));
+    }
+    points
+}
+
 /// A canvas of just `paths` (each hop as the airports it flies through), with
 /// nothing else drawn, to lay over the map.
 fn path_canvas<'a>(
@@ -1454,29 +1642,39 @@ fn path_canvas<'a>(
     (x0, x1, y0, y1): (f64, f64, f64, f64),
     paths: &'a [Vec<usize>],
     color: Color,
+    curved: bool,
 ) -> Canvas<'a, impl Fn(&mut ratatui::widgets::canvas::Context) + 'a> {
     Canvas::default()
         .x_bounds([x0, x1])
         .y_bounds([y0, y1])
-        .paint(move |ctx| draw_paths(ctx, net, (x0, x1, y0, y1), paths, color))
+        .paint(move |ctx| draw_paths(ctx, net, (x0, x1, y0, y1), paths, color, curved))
 }
 
-/// Draws `paths` (each hop as the airports it flies through) as lines clipped
-/// to `bounds`.
+/// Draws `paths` (each hop as the airports it flies through) clipped to
+/// `bounds`: as straight lines, or with `curved`, great circles.
 fn draw_paths(
     ctx: &mut ratatui::widgets::canvas::Context,
     net: &crate::flights::data::Network,
     bounds: Bounds,
     paths: &[Vec<usize>],
     color: Color,
+    curved: bool,
 ) {
     let xy = |i: usize| {
         let (lat, lon) = net.coords(i);
         (lon, lat)
     };
     for w in paths.iter().flat_map(|path| path.windows(2)) {
-        if let Some(((ax, ay), (bx, by))) = clip(xy(w[0]), xy(w[1]), bounds) {
-            ctx.draw(&CanvasLine::new(ax, ay, bx, by, color));
+        // Drawn on every copy of the world in view, so a leg off one edge
+        // comes back in at the other.
+        let points = leg_points(xy(w[0]), xy(w[1]), curved);
+        for turn in turns(bounds) {
+            let shift = |(x, y): (f64, f64)| (x + turn, y);
+            for p in points.windows(2) {
+                if let Some(((ax, ay), (bx, by))) = clip(shift(p[0]), shift(p[1]), bounds) {
+                    ctx.draw(&CanvasLine::new(ax, ay, bx, by, color));
+                }
+            }
         }
     }
 }
@@ -1513,17 +1711,42 @@ fn draw_map(f: &mut Frame, app: &FlightsApp, area: Rect) {
         Vec::new()
     };
     // The hop to the airport selected in the list, as it would be flown (straight,
-    // when connections aren't shown).
-    let preview: Vec<Vec<usize>> = selected_option
-        .map(|o| vec![path_of(game.current(), &o.connections, o.airport)])
-        .unwrap_or_default();
+    // when connections aren't shown); once the game is over, the hop picked in
+    // the route box.
+    let picked = app.selected_hop();
+    let preview: Vec<Vec<usize>> = match picked {
+        Some((from, ticket, to)) => vec![path_of(from, &ticket.via, to)],
+        None => selected_option
+            .map(|o| vec![path_of(game.current(), &o.connections, o.airport)])
+            .unwrap_or_default(),
+    };
 
     let mut shown: Vec<usize> = vec![game.origin(), game.destination(), game.current()];
     shown.extend(flown.iter().flatten());
     shown.extend(best.iter().flatten());
     shown.extend(preview.iter().flatten());
     shown.extend(options.iter().map(|o| o.airport));
-    let points: Vec<(f64, f64)> = shown.iter().map(|&i| net.coords(i)).collect();
+    let mut points: Vec<(f64, f64)> = shown.iter().map(|&i| net.coords(i)).collect();
+    // A curve bows toward the pole, past its airports, so the map fits it whole.
+    let curved = game.curves();
+    if curved {
+        let xy = |i: usize| {
+            let (lat, lon) = net.coords(i);
+            (lon, lat)
+        };
+        for w in flown
+            .iter()
+            .chain(&best)
+            .chain(&preview)
+            .flat_map(|path| path.windows(2))
+        {
+            points.extend(
+                leg_points(xy(w[0]), xy(w[1]), true)
+                    .into_iter()
+                    .map(|(lon, lat)| (lat, wrap_lon(lon, 0.0))),
+            );
+        }
+    }
     let title = if app.view.is_some() {
         " Map · [0] fit "
     } else {
@@ -1548,15 +1771,23 @@ fn draw_map(f: &mut Frame, app: &FlightsApp, area: Rect) {
     let finished: Vec<(&[Vec<usize>], Color)> = match game.status() {
         Status::Playing if preview.is_empty() => Vec::new(),
         Status::Playing => vec![(&preview, COLOR_WARNING)],
-        Status::Won => vec![(&flown, COLOR_ACCENT)],
-        Status::GivenUp => vec![(&flown, COLOR_ACCENT), (&best, COLOR_POSITIVE)],
+        Status::Won => vec![(&flown, COLOR_ACCENT), (&preview, COLOR_WARNING)],
+        Status::GivenUp => vec![
+            (&flown, COLOR_ACCENT),
+            (&best, COLOR_POSITIVE),
+            (&preview, COLOR_WARNING),
+        ],
     };
     let (x0, x1, y0, y1) = bounds;
-    let path_canvas = |path, color| path_canvas(net, bounds, path, color);
+    let path_canvas = |path, color| path_canvas(net, bounds, path, color, curved);
 
     // Labels in priority order, each airport once.
     let mut labels = MapLabels::new(bounds, inner.width, inner.height);
     labels.beside = !finished.is_empty();
+    let finished: Vec<_> = finished
+        .into_iter()
+        .filter(|(path, _)| !path.is_empty())
+        .collect();
     for &(path, color) in &finished {
         let local = Rect::new(0, 0, inner.width, inner.height);
         let mut scratch = ratatui::buffer::Buffer::empty(local);
@@ -1576,6 +1807,11 @@ fn draw_map(f: &mut Frame, app: &FlightsApp, area: Rect) {
             labels.add(x, y, net.code(i), style, dot);
         }
     };
+    // The picked hop's ends come first, so they're named whatever's near.
+    if let Some((from, _, to)) = picked {
+        label(to, black_on(COLOR_WARNING), COLOR_WARNING);
+        label(from, bold(COLOR_WARNING), COLOR_WARNING);
+    }
     label(
         game.destination(),
         bold(COLOR_DESTINATION),
@@ -1620,8 +1856,8 @@ fn draw_map(f: &mut Frame, app: &FlightsApp, area: Rect) {
                 color: Color::DarkGray,
             });
             ctx.layer();
-            draw_paths(ctx, net, bounds, &flown, COLOR_ACCENT);
-            draw_paths(ctx, net, bounds, &best, COLOR_POSITIVE);
+            draw_paths(ctx, net, bounds, &flown, COLOR_ACCENT, curved);
+            draw_paths(ctx, net, bounds, &best, COLOR_POSITIVE, curved);
             ctx.layer();
             for &(x, y, color) in &labels.dots {
                 ctx.draw(&Points {
@@ -1721,6 +1957,9 @@ fn draw_help(f: &mut Frame, game: &FlightsGame) {
                         ("0", "fit"),
                         ("wheel drag", "the map"),
                     ]),
+                    HelpLine::Bullet(Line::from(
+                        "Once a game is over, ↑↓ steps through its route, showing each hop on the map.",
+                    )),
                 ],
             },
             HelpSection {
@@ -1744,25 +1983,43 @@ fn draw_help(f: &mut Frame, game: &FlightsGame) {
 }
 
 /// The settings page: units, then the custom game's rules, each with its value
-/// between arrows, the selected row highlighted. Kept to fit an 80x24 terminal.
+/// between arrows, the selected row highlighted. The puzzle count and keys stay
+/// at the bottom; above them, the rows scroll to keep the selected one in view
+/// when they don't all fit (as on an 80x24 terminal).
 fn draw_settings(f: &mut Frame, page: &SettingsPage) {
-    let area = centered_rect(90, 90, f.area());
-    f.render_widget(Clear, area);
+    // Just big enough for the page, up to most of the screen; past that, its
+    // rows scroll.
+    let most = centered_rect(90, 90, f.area());
+    let inner_width = most.width.min(SETTINGS_WIDTH + 2).saturating_sub(2);
     let heading = bold(COLOR_ACCENT);
     let c = page.custom;
+    let on = |b: bool| if b { "On" } else { "Off" }.to_string();
     let value = |setting: Setting| -> (String, &'static str) {
         match setting {
             Setting::Units => (page.units.label().to_string(), "distance units"),
-            Setting::View => (c.view.label().to_string(), view_note(c.view)),
+            Setting::Lines => (
+                if page.curves { "Curved" } else { "Straight" }.to_string(),
+                if page.curves {
+                    "great circles, as flights fly"
+                } else {
+                    "straight across the map"
+                },
+            ),
+            Setting::View => (
+                c.view.label().to_string(),
+                "sets the 4 below as a level does",
+            ),
+            Setting::Map => (on(c.view.map), "else a list of codes"),
+            Setting::Distances => (on(c.view.distances), "while playing"),
+            Setting::Via => (on(c.view.connections), "where hops connect"),
+            Setting::Over => (on(c.view.amount_over), "when you arrive the long way"),
             Setting::Connections => (c.max_connections.to_string(), "per hop's ticket"),
-            Setting::Hops => (
+            Setting::MinHops => (c.min_hops.to_string(), "in the best route (3-20)"),
+            Setting::MaxHops => (
                 c.max_hops.map_or("No limit".to_string(), |n| n.to_string()),
                 "in the best route (3-20)",
             ),
-            Setting::Places => (
-                if c.show_places { "On" } else { "Off" }.to_string(),
-                "beside each option",
-            ),
+            Setting::Places => (on(c.show_places), "beside each option"),
             Setting::Reuse => (
                 if c.reuse_connections { "Yes" } else { "No" }.to_string(),
                 if c.reuse_connections {
@@ -1797,9 +2054,16 @@ fn draw_settings(f: &mut Frame, page: &SettingsPage) {
     };
     let name = |setting: Setting| match setting {
         Setting::Units => "Units",
+        Setting::Lines => "Map lines",
         Setting::View => "Shows",
+        // The view's parts, indented under the preset that sets them.
+        Setting::Map => "  Map",
+        Setting::Distances => "  Distances",
+        Setting::Via => "  Connections",
+        Setting::Over => "  How far over",
         Setting::Connections => "Max connections",
-        Setting::Hops => "Max hops",
+        Setting::MinHops => "Min hops",
+        Setting::MaxHops => "Max hops",
         Setting::Places => "City, country",
         Setting::Mode => "Puzzles",
         Setting::Start => "Start",
@@ -1842,56 +2106,52 @@ fn draw_settings(f: &mut Frame, page: &SettingsPage) {
             Span::styled(format!("  {note}"), Style::default().fg(Color::DarkGray)),
         ])
     };
-    let mut lines = vec![
-        Line::from(Span::styled("Settings", heading)),
-        row_line(0, SETTINGS[0]),
-        Line::from(""),
-        Line::from(Span::styled("Custom game", heading)),
-    ];
-    let reset = SETTINGS.len() - 1;
-    lines.extend(
-        SETTINGS[..reset]
-            .iter()
-            .enumerate()
-            .skip(1)
-            .map(|(i, &s)| row_line(i, s)),
-    );
-    lines.push(Line::from(""));
-    // The reset row is a button too: where it lands, after any wrapped lines
-    // above, so a click on it can be told apart.
-    let inner = Block::default().borders(Borders::ALL).inner(area);
-    let wrapped = |lines: Vec<Line<'static>>| {
+    // The rows, in lines, noting where the selected one and the reset button
+    // land once wrapped.
+    let wrapped = |lines: &[Line<'static>]| {
         u16::try_from(
-            Paragraph::new(lines)
+            Paragraph::new(lines.to_vec())
                 .wrap(Wrap { trim: false })
-                .line_count(inner.width),
+                .line_count(inner_width),
         )
         .unwrap_or(u16::MAX)
     };
-    let above = wrapped(lines.clone());
-    let reset_line = row_line(reset, SETTINGS[reset]);
-    let height = wrapped(vec![reset_line.clone()]);
-    page.reset_area.set(
-        Rect::new(inner.x, inner.y.saturating_add(above), inner.width, height).intersection(inner),
-    );
-    lines.push(reset_line);
-    lines.push(Line::from(""));
-    lines.push(match (&page.problem, &page.status) {
-        (Some(problem), _) => Line::from(Span::styled(problem.clone(), bold(COLOR_WARNING))),
-        (None, Err(why)) => Line::from(Span::styled(
-            format!("Can't play these settings: {why}."),
-            bold(COLOR_WARNING),
-        )),
-        // Counted with connections reused, so only a bound when they can't be.
-        (None, Ok(count)) => Line::from(vec![
-            Span::raw(if c.count_is_exact() {
-                "Puzzles with these settings: "
-            } else {
-                "Puzzles with these settings: up to "
-            }),
-            Span::styled(grouped(*count), bold(COLOR_POSITIVE)),
-        ]),
-    });
+    let mut rows = vec![Line::from(Span::styled("Settings", heading))];
+    // (top, height) of each row, in wrapped lines.
+    let mut spans = Vec::new();
+    let reset = SETTINGS.len() - 1;
+    for (i, &setting) in SETTINGS.iter().enumerate() {
+        if i == PREFERENCE_ROWS {
+            rows.push(Line::from(""));
+            rows.push(Line::from(Span::styled("Custom game", heading)));
+        }
+        if i == reset {
+            rows.push(Line::from(""));
+        }
+        let line = row_line(i, setting);
+        spans.push((wrapped(&rows), wrapped(std::slice::from_ref(&line))));
+        rows.push(line);
+    }
+
+    let mut bottom = vec![
+        Line::from(""),
+        match (&page.problem, &page.status) {
+            (Some(problem), _) => Line::from(Span::styled(problem.clone(), bold(COLOR_WARNING))),
+            (None, Err(why)) => Line::from(Span::styled(
+                format!("Can't play these settings: {why}."),
+                bold(COLOR_WARNING),
+            )),
+            // Counted with connections reused, so only a bound when they can't be.
+            (None, Ok(count)) => Line::from(vec![
+                Span::raw(if c.count_is_exact() {
+                    "Puzzles with these settings: "
+                } else {
+                    "Puzzles with these settings: up to "
+                }),
+                Span::styled(grouped(*count), bold(COLOR_POSITIVE)),
+            ]),
+        },
+    ];
     // Each level's own limit, for reference when choosing custom's.
     let levels: Vec<String> = Difficulty::STANDARD
         .iter()
@@ -1904,35 +2164,70 @@ fn draw_settings(f: &mut Frame, page: &SettingsPage) {
             )
         })
         .collect();
-    lines.push(Line::from(Span::styled(
+    bottom.push(Line::from(Span::styled(
         format!("Levels' max hops: {}", levels.join(", ")),
         Style::default().fg(Color::DarkGray),
     )));
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
+    bottom.push(Line::from(""));
+    bottom.push(Line::from(Span::styled(
         "[↑↓] choose  [←→] change  [Enter] play custom  [Esc] close",
         Style::default().fg(Color::Gray),
     )));
+
+    let total = wrapped(&rows);
+    let height = (total + wrapped(&bottom) + 2).min(most.height);
+    let area = Rect::new(
+        most.x + most.width.saturating_sub(inner_width + 2) / 2,
+        most.y + (most.height - height) / 2,
+        inner_width + 2,
+        height,
+    );
+    f.render_widget(Clear, area);
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    // The bottom keeps its lines, unless the page is too short even for them.
+    let bottom_height = wrapped(&bottom).min(inner.height / 2);
+    let [top_area, bottom_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(bottom_height)]).areas(inner);
+    let (sel_top, sel_height) = spans[page.row];
+    // Scrolled no further than it takes to show the selected row in full.
+    let scroll = (sel_top + sel_height)
+        .saturating_sub(top_area.height)
+        .min(total.saturating_sub(top_area.height));
+    let (reset_top, reset_height) = spans[reset];
+    page.reset_area.set(
+        Rect::new(
+            top_area.x,
+            (top_area.y + reset_top).saturating_sub(scroll),
+            top_area.width,
+            reset_height,
+        )
+        .intersection(top_area),
+    );
+
+    let more = match (scroll > 0, scroll + top_area.height < total) {
+        (true, true) => " ↑↓ more ",
+        (true, false) => " ↑ more ",
+        (false, true) => " ↓ more ",
+        (false, false) => "",
+    };
     f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Settings ")
-                .border_style(Style::default().fg(COLOR_ACCENT)),
-        ),
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Settings ")
+            .title_bottom(Line::from(more).right_aligned())
+            .border_style(Style::default().fg(COLOR_ACCENT)),
         area,
     );
-}
-
-/// What a view shows, for the settings page.
-fn view_note(view: Difficulty) -> &'static str {
-    match view {
-        Difficulty::Easy => "map, distances, connections",
-        Difficulty::Medium => "map and connections",
-        Difficulty::Hard => "connections only",
-        _ => "codes only",
-    }
+    f.render_widget(
+        Paragraph::new(rows)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        top_area,
+    );
+    f.render_widget(
+        Paragraph::new(bottom).wrap(Wrap { trim: false }),
+        bottom_area,
+    );
 }
 
 #[cfg(test)]
@@ -2128,7 +2423,7 @@ mod tests {
         assert!(screen.contains(&shown), "no '{shown}' for '{place}'");
 
         let custom = Rules {
-            view: Difficulty::Hard,
+            view: View::of(Difficulty::Hard),
             show_places: false,
             ..Rules::default()
         };
@@ -2150,8 +2445,10 @@ mod tests {
         for text in [
             "Settings",
             "Units",
+            "Map lines",
+            "Curved",
             "Custom game",
-            "Max hops",
+            "Max connections",
             "Puzzles with these",
         ] {
             assert!(screen.contains(text), "no '{text}'");
@@ -2159,20 +2456,34 @@ mod tests {
         let page = app.settings.as_mut().unwrap();
         let row = |s: Setting| SETTINGS.iter().position(|&r| r == s).unwrap();
         page.change(true); // units: nm -> mi
+        page.row = row(Setting::Lines);
+        page.change(true); // map lines: curved -> straight
         page.row = row(Setting::View);
         page.change(true); // view: medium -> hard
         page.row = row(Setting::Connections);
         page.change(false); // connections: 1 -> 0
-        page.row = row(Setting::Hops);
-        page.change(false); // hops: 6 -> 5
+        page.row = row(Setting::MaxHops);
+        page.change(false); // max hops: 6 -> 5
+        page.row = row(Setting::MinHops);
+        page.change(true); // min hops: 3 -> 4
         page.row = row(Setting::Places);
         page.change(true); // places: off
+        page.row = row(Setting::Distances);
+        page.change(true); // Hard's view, but with distances: no level's
+        let screen = render(&mut app, 80, 24);
+        show(&screen);
+        assert!(screen.contains("Mixed"), "{screen}");
         app.close_settings(true);
         assert!(app.settings.is_none());
         assert_eq!(app.game.units(), Units::Mi);
+        assert!(!app.game.curves());
         assert_eq!(app.game.difficulty(), Difficulty::Custom);
         let want = Rules {
-            view: Difficulty::Hard,
+            view: View {
+                distances: true,
+                ..View::of(Difficulty::Hard)
+            },
+            min_hops: 4,
             max_hops: Some(5),
             max_connections: 0,
             show_places: false,
@@ -2186,13 +2497,170 @@ mod tests {
         // Escape keeps edits without starting a game.
         app.open_settings();
         let page = app.settings.as_mut().unwrap();
-        page.row = row(Setting::Hops);
-        for _ in 0..(MAX_HOPS - 5 + 1) {
-            page.change(true); // 5 .. 20, then no limit
+        page.row = row(Setting::MaxHops);
+        page.change(false); // max hops: 5 -> 4, the min...
+        page.change(false); // ...below which it wraps round to no limit
+        assert_eq!(page.custom.max_hops, None);
+        page.change(true); // and back round to the least
+        assert_eq!(page.custom.max_hops, Some(4));
+        page.row = row(Setting::MinHops);
+        page.change(true); // nor min hops above max: wraps to 3
+        assert_eq!(page.custom.min_hops, MIN_HOPS);
+        page.row = row(Setting::MaxHops);
+        for _ in 0..(MAX_HOPS - 4 + 1) {
+            page.change(true); // 4 .. 20, then no limit
         }
+        page.row = row(Setting::View);
+        page.change(false); // a mixed view steps back to the last level
+        assert_eq!(page.custom.view, View::of(Difficulty::Pilot));
         app.close_settings(false);
         assert_eq!(app.game.custom().max_hops, None);
         assert_eq!(app.game.rules().max_hops, Some(5));
+    }
+
+    #[test]
+    fn settings_rows_scroll_to_keep_the_selection_in_view() {
+        let mut app = app(Difficulty::Medium);
+        app.open_settings();
+        let screen = render(&mut app, 80, 24);
+        show(&screen);
+        // On 80x24 the last rows don't fit at first, and the bottom says so.
+        assert!(
+            screen.contains("Units") && !screen.contains("Defaults"),
+            "{screen}"
+        );
+        assert!(screen.contains("↓ more"), "{screen}");
+        // Every row stays visible as the selection moves down to the last.
+        for _ in 1..SETTINGS.len() {
+            app.settings.as_mut().unwrap().step_row(true);
+            let screen = render(&mut app, 80, 24);
+            assert!(
+                screen.contains(" > "),
+                "the selected row is hidden:\n{screen}"
+            );
+            assert!(screen.contains("Puzzles with these"), "{screen}");
+        }
+        let screen = render(&mut app, 80, 24);
+        show(&screen);
+        assert!(
+            screen.contains("Defaults") && screen.contains("↑ more"),
+            "{screen}"
+        );
+        // The reset button is clicked where it's drawn, scrolled or not.
+        let reset = app.settings.as_ref().unwrap().reset_area.get();
+        assert!(reset.height > 0);
+        let row_text: String = screen.lines().nth(reset.y as usize).unwrap().to_string();
+        assert!(row_text.contains("Defaults"), "{row_text}");
+        // On a narrow screen, where rows wrap, the selection still stays in view.
+        let page = app.settings.as_mut().unwrap();
+        page.row = 0;
+        for _ in 1..SETTINGS.len() {
+            app.settings.as_mut().unwrap().step_row(true);
+            let screen = render(&mut app, 40, 30);
+            assert!(
+                screen.contains(" > "),
+                "the selected row is hidden:\n{screen}"
+            );
+        }
+        show(&render(&mut app, 40, 30));
+    }
+
+    #[test]
+    fn settings_page_is_just_big_enough() {
+        let mut app = app(Difficulty::Medium);
+        app.open_settings();
+        for reuse in [false, true] {
+            app.settings.as_mut().unwrap().custom.reuse_connections = reuse;
+            let screen = render(&mut app, 120, 50);
+            show(&screen);
+            let lines: Vec<&str> = screen.lines().collect();
+            let top = lines.iter().position(|l| l.contains("Settings ─")).unwrap();
+            let keys = lines
+                .iter()
+                .position(|l| l.contains("[Esc] close"))
+                .unwrap();
+            let bottom = keys + 1;
+            assert!(lines[bottom].contains("└────"), "{screen}");
+            // Shorter than the screen, with nothing scrolled away.
+            assert!(top > 2 && bottom < 47, "{screen}");
+            assert!(!screen.contains("more"), "{screen}");
+            // The count and keys follow the rows, not the bottom of the page.
+            let defaults = lines.iter().position(|l| l.contains("Defaults")).unwrap();
+            let count = lines
+                .iter()
+                .position(|l| l.contains("Puzzles with these"))
+                .unwrap();
+            assert_eq!(count, defaults + 2, "{screen}");
+            // No row wraps: each note ends on its row's line.
+            let reuse_row = lines
+                .iter()
+                .find(|l| l.contains("Reuse connections"))
+                .unwrap();
+            assert!(reuse_row.contains("connections too") || reuse_row.contains("as connections"));
+            // And the page is no wider than its rows.
+            let left = lines[top].find('┌').unwrap();
+            let right = lines[top].rfind('┐').unwrap();
+            assert_eq!(lines[top][left..right].chars().count(), 71, "{screen}");
+        }
+    }
+
+    #[test]
+    fn route_hops_are_numbered_and_stepped_through_once_over() {
+        let mut app = app(Difficulty::Easy);
+        app.submit();
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains(" 1. "), "{screen}");
+        app.trigger_give_up();
+        let orange = |app: &mut FlightsApp| {
+            let buf = buffer(app, 120, 34);
+            buf.content()
+                .iter()
+                .filter(|c| c.fg == COLOR_WARNING && braille(c))
+                .count()
+        };
+        let picked = |app: &mut FlightsApp| {
+            let buf = buffer(app, 120, 34);
+            let rows: Vec<u16> = (0..34u16)
+                .filter(|&y| (0..120u16).any(|x| buf[(x, y)].bg == HIGHLIGHT_BG))
+                .collect();
+            rows
+        };
+        // Both routes whole, and nothing picked, until a key is pressed.
+        assert_eq!(orange(&mut app), 0);
+        assert!(picked(&mut app).is_empty());
+        let screen = render(&mut app, 120, 34);
+        assert!(screen.contains("[↑↓] each hop"), "{screen}");
+        let steps = app.step_count();
+        assert_eq!(steps, app.game.legs().len() + app.game.best_legs().len());
+        for i in 0..steps {
+            app.move_selection(true);
+            assert_eq!(app.route_step, Some(i));
+            // The hop is drawn on the map and its line highlighted, in view.
+            assert!(orange(&mut app) > 0, "hop {i} isn't on the map");
+            assert_eq!(picked(&mut app).len(), 1, "hop {i} isn't highlighted");
+        }
+        show(&render(&mut app, 120, 34));
+        // The last hop is the shortest route's, arriving at the destination.
+        let (_, _, to) = app.selected_hop().unwrap();
+        assert_eq!(to, app.game.destination());
+        app.move_selection(true);
+        assert_eq!(app.route_step, Some(steps - 1));
+        // A small screen still scrolls the picked hop into view.
+        for _ in 0..steps {
+            app.move_selection(false);
+            assert_eq!(
+                (0..18u16)
+                    .filter(|&y| {
+                        let buf = buffer(&mut app, 80, 18);
+                        (0..80u16).any(|x| buf[(x, y)].bg == HIGHLIGHT_BG)
+                    })
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(app.route_step, Some(0));
+        app.start_new_game(None);
+        assert_eq!(app.route_step, None);
     }
 
     #[test]
@@ -2267,7 +2735,7 @@ mod tests {
             let row = title
                 + lines[title..]
                     .iter()
-                    .position(|l| l.contains(&format!("→ {}", net.code(stop))))
+                    .position(|l| l.contains(&format!(" 1. {}", net.code(stop))))
                     .expect("the shortest route's first stop is listed");
             assert!(
                 lines[row + 1..=row + 2]
@@ -2515,6 +2983,143 @@ mod tests {
     }
 
     #[test]
+    fn curved_legs_follow_great_circles() {
+        // Straight: just the ends.
+        assert_eq!(
+            leg_points((-73.8, 40.6), (-0.5, 51.5), false),
+            vec![(-73.8, 40.6), (-0.5, 51.5)]
+        );
+        // New York to London bows north, past both, and ends where it should.
+        let curve = leg_points((-73.8, 40.6), (-0.5, 51.5), true);
+        let (first, last) = (curve[0], curve[curve.len() - 1]);
+        assert_eq!(first, (-73.8, 40.6));
+        assert!((last.0 - -0.5).abs() < 1e-9 && (last.1 - 51.5).abs() < 1e-9);
+        let north = curve.iter().map(|p| p.1).fold(f64::MIN, f64::max);
+        assert!(north > 53.0, "{north}");
+        // Tokyo to Los Angeles crosses the Pacific, longitudes running on past
+        // 180° without a jump, and bows north too.
+        let curve = leg_points((140.4, 35.8), (-118.4, 33.9), true);
+        assert!(curve.windows(2).all(|w| (w[1].0 - w[0].0).abs() < 5.0));
+        assert!((curve[curve.len() - 1].0 - 241.6).abs() < 1e-9);
+        assert!(curve.iter().any(|p| p.1 > 45.0));
+        // Opposite sides of the world have no one great circle: straight.
+        assert_eq!(leg_points((0.0, 0.0), (180.0, 0.0), true).len(), 2);
+    }
+
+    #[test]
+    fn curves_are_drawn_and_kept() {
+        // Far north, where a great circle bows well away from a straight line.
+        let text = "A\tAAA\t60\t0\nA\tABA\t60\t40\nA\tABB\t60\t60\nA\tBAA\t70\t0\n\
+                    A\tBBA\t70\t45\nA\tBBB\t60\t90\n\
+                    H\tAAA\tABA\t-\t-\t-\nH\tABA\tABB\t-\t-\t-\nH\tABB\tBBB\t-\t-\t-\n\
+                    H\tAAA\tBAA\t-\t-\t-\nH\tBAA\tBBA\t-\t-\t-\nH\tBBA\tBBB\t-\t-\t-\n";
+        let net: &'static crate::flights::data::Network = Box::leak(Box::new(
+            crate::flights::data::Network::parse(text, 1).unwrap(),
+        ));
+        let at = |c: &str| net.index_of(c).unwrap();
+        let game = FlightsGame::with_puzzle(
+            net,
+            at("AAA"),
+            at("BBB"),
+            Difficulty::Medium,
+            Rules::default(),
+            Units::Nm,
+            None,
+        )
+        .unwrap();
+        let mut app = FlightsApp::new(game);
+        app.fly("ABA");
+        // The highest row the route's blue line reaches, and its cells.
+        let route = |app: &mut FlightsApp| {
+            let buf = buffer(app, 120, 34);
+            let cells: Vec<(u16, u16)> = (0..34u16)
+                .flat_map(|y| (0..120u16).map(move |x| (x, y)))
+                .filter(|&(x, y)| buf[(x, y)].fg == COLOR_ACCENT && braille(&buf[(x, y)]))
+                .collect();
+            cells
+        };
+        // One view for both, since a curve refits the map to hold it.
+        app.view = Some((-20.0, 110.0, 40.0, 85.0));
+        let curved = route(&mut app);
+        assert!(app.game.curves(), "curves are the default");
+        app.game.set_curves(false);
+        let straight = route(&mut app);
+        show(&render(&mut app, 120, 34));
+        assert!(!straight.is_empty() && !curved.is_empty());
+        assert_ne!(straight, curved);
+        let top = |cells: &[(u16, u16)]| cells.iter().map(|c| c.1).min().unwrap();
+        assert!(top(&curved) < top(&straight), "the curve doesn't bow north");
+        // Straight lines are kept through new games and the save, which notes
+        // only that, so a save without it (an older one, too) has curves.
+        app.start_new_game(None);
+        assert!(!app.game.curves());
+        let saved = app.game.to_saved();
+        assert!(!saved.curves);
+        let json = serde_json::to_string(&saved).unwrap();
+        assert!(json.contains("\"curves\":false"), "{json}");
+        app.game.set_curves(true);
+        let json = serde_json::to_string(&app.game.to_saved()).unwrap();
+        assert!(!json.contains("curves"), "{json}");
+        let old: SavedGame = serde_json::from_str(&json).unwrap();
+        assert!(old.curves);
+    }
+
+    #[test]
+    fn hops_cross_the_date_line_the_short_way() {
+        // Around the antimeridian: from 170°E east to 160°W.
+        let text = "A\tAAA\t0\t170\nA\tABA\t0\t-175\nA\tABB\t0\t-165\nA\tBAA\t10\t175\n\
+                    A\tBBA\t10\t-170\nA\tBBB\t0\t-160\n\
+                    H\tAAA\tABA\t-\t-\t-\nH\tABA\tABB\t-\t-\t-\nH\tABB\tBBB\t-\t-\t-\n\
+                    H\tAAA\tBAA\t-\t-\t-\nH\tBAA\tBBA\t-\t-\t-\nH\tBBA\tBBB\t-\t-\t-\n";
+        let net: &'static crate::flights::data::Network = Box::leak(Box::new(
+            crate::flights::data::Network::parse(text, 1).unwrap(),
+        ));
+        let at = |c: &str| net.index_of(c).unwrap();
+        // On the whole world, the hop leaves the right edge and comes in at the
+        // left, with nothing across the middle.
+        let (w, h) = (90u16, 20u16);
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, w, h));
+        let paths = vec![vec![at("AAA"), at("ABA")]];
+        path_canvas(
+            net,
+            (-180.0, 180.0, -45.0, 45.0),
+            &paths,
+            COLOR_ACCENT,
+            false,
+        )
+        .render(buf.area, &mut buf);
+        let drawn = |cols: std::ops::Range<u16>| {
+            cols.flat_map(|x| (0..h).map(move |y| (x, y)))
+                .any(|(x, y)| braille(&buf[(x, y)]))
+        };
+        assert!(drawn(w - 3..w), "nothing at the right edge");
+        assert!(drawn(0..3), "nothing at the left edge");
+        assert!(!drawn(10..w - 10), "the hop went the long way round");
+
+        // Playing there, the map centres on the Pacific rather than the world.
+        let game = FlightsGame::with_puzzle(
+            net,
+            at("AAA"),
+            at("BBB"),
+            Difficulty::Medium,
+            Rules::default(),
+            Units::Nm,
+            None,
+        )
+        .unwrap();
+        let mut app = FlightsApp::new(game);
+        app.fly("ABA");
+        let screen = render(&mut app, 120, 34);
+        show(&screen);
+        let (_, (x0, x1, ..)) = app.current_view().unwrap();
+        assert!(x0 < 170.0 && x1 > 200.0 && x1 - x0 < 120.0, "{x0} {x1}");
+        for code in ["AAA", "ABA", "BBB"] {
+            let map: String = screen.lines().flat_map(|l| l.chars().take(60)).collect();
+            assert!(map.contains(code), "{code} isn't on the map:\n{screen}");
+        }
+    }
+
+    #[test]
     fn giving_up_shows_both_routes() {
         // A small network where the routes part at once: the shortest heads east
         // along the equator, the player north.
@@ -2582,7 +3187,7 @@ mod tests {
         let page = app.settings.as_mut().unwrap();
         let row = |s: Setting| SETTINGS.iter().position(|&r| r == s).unwrap();
         // Random mode: Up / Down skip the start and end, on to the reset button.
-        page.row = row(Setting::Hops);
+        page.row = row(Setting::MaxHops);
         page.step_row(true);
         assert_eq!(SETTINGS[page.row], Setting::Reset);
         // Route mode: they skip the limits instead (a route still has
@@ -2616,7 +3221,7 @@ mod tests {
         page.change(false);
         assert_eq!(page.custom.max_connections, 0);
         page.step_row(true);
-        assert_eq!(SETTINGS[page.row], Setting::Hops);
+        assert_eq!(SETTINGS[page.row], Setting::MinHops);
         page.row = row(Setting::Units);
         page.change(true);
         let units = page.units;
@@ -2784,7 +3389,10 @@ mod tests {
         let (x0, x1, y0, y1) = map_bounds(&[(0.0, 0.0), (0.0, 10.0)], 80, 20);
         // 80 columns by 20 rows is twice as wide as tall on screen.
         assert!(((x1 - x0) / (y1 - y0) - 2.0).abs() < 1e-9);
+        // Across the antimeridian, the view is the 20° between, not the 340°.
         let (x0, x1, ..) = map_bounds(&[(0.0, -170.0), (0.0, 170.0)], 80, 20);
-        assert!(x0 <= -180.0 && x1 >= 180.0);
+        assert!(x0 < 170.0 && x1 > 190.0 && x1 - x0 < 60.0, "{x0} {x1}");
+        assert_eq!(wrap_lon(-170.0, 180.0), 190.0);
+        assert_eq!(wrap_lon(170.0, 0.0), 170.0);
     }
 }

@@ -2,8 +2,8 @@ use std::time::Instant;
 
 use jotto::flights::data::{network, Network, STANDARD_CONNECTIONS};
 use jotto::flights::game::{
-    Difficulty, FlightsGame, FlyError, FlyOutcome, PuzzleError, Rules, SavedRules, Status, Units,
-    DAILY_DIFFICULTY,
+    Difficulty, FlightsGame, FlyError, FlyOutcome, PuzzleError, Rules, SavedRules, SavedView,
+    Status, Units, View, DAILY_DIFFICULTY, MIN_HOPS,
 };
 
 /// A small network: AAA to BBB along the equator through ABA and ABB (3° in all),
@@ -291,7 +291,8 @@ fn difficulty_levels() {
     }
     // Custom plays by whatever it's given.
     let mine = Rules {
-        view: Difficulty::Pilot,
+        view: View::of(Difficulty::Pilot),
+        min_hops: MIN_HOPS,
         max_hops: Some(9),
         max_connections: 0,
         show_places: false,
@@ -306,7 +307,8 @@ fn difficulty_levels() {
 #[test]
 fn saved_rules_round_trip_and_reject_nonsense() {
     let mine = Rules {
-        view: Difficulty::Hard,
+        view: View::of(Difficulty::Hard),
+        min_hops: MIN_HOPS,
         max_hops: None,
         max_connections: 2,
         show_places: false,
@@ -316,9 +318,47 @@ fn saved_rules_round_trip_and_reject_nonsense() {
         reuse_connections: false,
     };
     assert_eq!(SavedRules::from(mine).rules(), Some(mine));
+    // A view no level has, and a hop range, round-trip too.
+    let mixed = Rules {
+        view: View {
+            map: false,
+            distances: true,
+            connections: false,
+            amount_over: true,
+        },
+        min_hops: 5,
+        max_hops: Some(7),
+        ..mine
+    };
+    assert_eq!(mixed.view.level(), None);
+    let json = serde_json::to_string(&SavedRules::from(mixed)).unwrap();
+    let back: SavedRules = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.rules(), Some(mixed), "{json}");
+    // Saves from before the view's parts could be set name a level, and have
+    // no min hops.
+    let old: SavedRules = serde_json::from_str(
+        r#"{"view": "hard", "max_hops": 6, "max_connections": 1, "show_places": true}"#,
+    )
+    .unwrap();
+    let old = old.rules().unwrap();
+    assert_eq!(old.view, View::of(Difficulty::Hard));
+    assert_eq!((old.min_hops, old.max_hops), (MIN_HOPS, Some(6)));
+    // A minimum of 3 isn't written, as before there was one.
+    assert!(!serde_json::to_string(&SavedRules::from(mine))
+        .unwrap()
+        .contains("min_hops"));
     for broken in [
         SavedRules {
-            view: "custom".into(),
+            view: SavedView::Level("custom".into()),
+            ..mine.into()
+        },
+        SavedRules {
+            min_hops: 2,
+            ..mine.into()
+        },
+        SavedRules {
+            min_hops: 9,
+            max_hops: Some(8),
             ..mine.into()
         },
         SavedRules {
@@ -423,7 +463,8 @@ fn games_are_dealt_within_their_level() {
 #[test]
 fn custom_games_play_by_their_rules() {
     let mine = Rules {
-        view: Difficulty::Pilot,
+        view: View::of(Difficulty::Pilot),
+        min_hops: MIN_HOPS,
         max_hops: Some(4),
         max_connections: 2,
         show_places: false,
@@ -558,9 +599,83 @@ fn destination_comes_first_in_the_options() {
 }
 
 #[test]
+fn custom_hop_ranges_deal_only_their_lengths() {
+    let net = network(STANDARD_CONNECTIONS);
+    let range = |min, max| Rules {
+        min_hops: min,
+        max_hops: max,
+        ..Rules::default()
+    };
+    // The counts split cleanly at any minimum.
+    let all = range(MIN_HOPS, None).puzzle_count();
+    for min in [4, 7, 10] {
+        let below = range(MIN_HOPS, Some(min - 1)).puzzle_count();
+        assert_eq!(
+            below + range(min, None).puzzle_count(),
+            all,
+            "split at {min}"
+        );
+    }
+    // Dealt puzzles keep to both limits, including a far minimum, and quickly.
+    let started = Instant::now();
+    for (min, max) in [(5, Some(6)), (9, None), (7, Some(7))] {
+        let rules = range(min, max);
+        assert!(rules.puzzle_count() > 0, "{min}..{max:?}");
+        for _ in 0..5 {
+            let g = FlightsGame::random(Difficulty::Custom, rules, Units::Nm, None).unwrap();
+            let hops = g.best_route().len() - 1;
+            assert!(
+                hops >= min && max.is_none_or(|m| hops <= m),
+                "{min}..{max:?}: {hops}"
+            );
+            let (s, e) = (g.origin(), g.destination());
+            assert!(net.puzzle_ends(s, rules.hop_range()).contains(&e));
+        }
+    }
+    assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
+    // How the range reads.
+    let text = |min, max| range(min, max).hops_text();
+    assert_eq!(text(3, Some(6)), "up to 6 hops");
+    assert_eq!(text(4, Some(6)), "4 to 6 hops");
+    assert_eq!(text(5, Some(5)), "5 hops");
+    assert_eq!(text(5, None), "at least 5 hops");
+    assert_eq!(text(3, None), "any number of hops");
+}
+
+#[test]
+fn views_are_each_levels_parts() {
+    for d in Difficulty::STANDARD {
+        assert_eq!(View::of(d).level(), Some(d));
+        assert_eq!(d.rules(Rules::default()).view, View::of(d));
+    }
+    assert_eq!(
+        View::of(Difficulty::Easy).parts(),
+        "map, distances, connections and how far over"
+    );
+    assert_eq!(View::of(Difficulty::Hard).parts(), "connections");
+    assert_eq!(View::of(Difficulty::Pilot).parts(), "codes only");
+    let mixed = View {
+        distances: true,
+        ..View::of(Difficulty::Pilot)
+    };
+    assert_eq!((mixed.level(), mixed.label()), (None, "Mixed"));
+    let rules = Rules {
+        view: mixed,
+        ..Rules::default()
+    };
+    assert!(rules.shows_distances() && !rules.shows_map() && !rules.shows_connections());
+    assert!(
+        rules.summary().starts_with("shows distances,"),
+        "{}",
+        rules.summary()
+    );
+}
+
+#[test]
 fn custom_start_and_end_are_checked() {
     let with = |start: Option<&str>, end: Option<&str>, max_hops| Rules {
-        view: Difficulty::Medium,
+        view: View::of(Difficulty::Medium),
+        min_hops: MIN_HOPS,
         max_hops,
         max_connections: STANDARD_CONNECTIONS,
         show_places: true,

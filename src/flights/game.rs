@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::dict;
 use crate::flights::data::{
-    letters_apart, network, Hop, Network, OnceRoute, Ticket, MAX_CONNECTIONS, STANDARD_CONNECTIONS,
+    letters_apart, network, Hop, HopRange, Network, OnceRoute, Ticket, MAX_CONNECTIONS,
+    STANDARD_CONNECTIONS,
 };
 use crate::game::sanitize_input;
 use crate::save::{self, enum_name, parse_enum, Loaded, Notice, Saveable, SAVE_VERSION};
@@ -96,17 +97,78 @@ impl FromStr for Difficulty {
     }
 }
 
-/// Smallest and largest hop limit a custom game may set; every puzzle takes at
-/// least 3, since start and end differ in every letter. (Custom may also have no limit.)
+/// Smallest and largest hop limits a custom game may set, as its min or max hops;
+/// every puzzle takes at least 3, since start and end differ in every letter.
+/// (Custom's max may also be no limit.)
 pub const MIN_HOPS: usize = 3;
 /// See [`MIN_HOPS`].
 pub const MAX_HOPS: usize = 20;
 
+/// What a game shows while it's played. Each standard level sets all of it (see
+/// [`View::of`]); a custom game sets each part on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct View {
+    /// Whether the map is drawn.
+    pub map: bool,
+    /// Whether distances are shown while playing (they all are once a game ends).
+    pub distances: bool,
+    /// Whether hops show where they connect, before and after they're flown.
+    pub connections: bool,
+    /// Whether arriving the long way says by how much.
+    pub amount_over: bool,
+}
+
+impl View {
+    /// A standard level's view (Custom has none of its own: Medium's).
+    pub const fn of(level: Difficulty) -> Self {
+        use Difficulty::*;
+        Self {
+            map: matches!(level, Easy | Medium | Custom),
+            distances: matches!(level, Easy),
+            connections: !matches!(level, Pilot),
+            amount_over: matches!(level, Easy | Medium | Custom),
+        }
+    }
+
+    /// The standard level with exactly this view, if one has it.
+    pub fn level(&self) -> Option<Difficulty> {
+        Difficulty::STANDARD
+            .into_iter()
+            .find(|&d| Self::of(d) == *self)
+    }
+
+    /// The level's name, or "Mixed" for a view no level has.
+    pub fn label(&self) -> &'static str {
+        self.level().map_or("Mixed", Difficulty::label)
+    }
+
+    /// What's shown, as a list ("map and connections", "codes only").
+    pub fn parts(&self) -> String {
+        let parts: Vec<&str> = [
+            (self.map, "map"),
+            (self.distances, "distances"),
+            (self.connections, "connections"),
+            (self.amount_over, "how far over"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        match parts.as_slice() {
+            [] => "codes only".to_string(),
+            [one] => one.to_string(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        }
+    }
+}
+
 /// What a game deals and shows: a standard level's fixed rules, or a custom game's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rules {
-    /// The standard level whose view is used: what's shown (never `Custom`).
-    pub view: Difficulty,
+    /// What's shown while playing.
+    pub view: View,
+    /// Fewest hops a dealt puzzle's shortest route has ([`MIN_HOPS`]: no minimum
+    /// beyond what every puzzle takes).
+    pub min_hops: usize,
     /// Most hops a dealt puzzle's shortest route has (`None`: no limit).
     pub max_hops: Option<usize>,
     /// Most connections a hop may have.
@@ -144,11 +206,12 @@ pub fn code_str(code: &Code) -> &str {
 }
 
 impl Rules {
-    /// A standard level's rules, which it's also the view of.
-    const fn standard(view: Difficulty) -> Self {
+    /// A standard level's rules.
+    const fn standard(level: Difficulty) -> Self {
         Self {
-            view,
-            max_hops: match view {
+            view: View::of(level),
+            min_hops: MIN_HOPS,
+            max_hops: match level {
                 Difficulty::Easy => Some(4),
                 Difficulty::Medium => Some(6),
                 Difficulty::Hard => Some(8),
@@ -177,13 +240,16 @@ impl Default for Rules {
 const ONCE_DEAL_ATTEMPTS: usize = 200;
 
 impl Rules {
-    /// Most hops a dealt puzzle's shortest route has (`None`: no limit); a fixed
-    /// route has none.
-    pub fn hop_limit(&self) -> Option<usize> {
+    /// The hops a dealt puzzle's shortest route may take; a fixed route has no
+    /// limits.
+    pub fn hop_range(&self) -> HopRange {
         if self.fixed_route {
-            None
+            HopRange::default()
         } else {
-            self.max_hops
+            HopRange {
+                min: self.min_hops,
+                max: self.max_hops,
+            }
         }
     }
 
@@ -218,16 +284,13 @@ impl Rules {
     }
 
     /// Whether these rules deal `start` to `end`: playable, and with a shortest
-    /// route within the hop limit.
+    /// route within the hop limits.
     /// Only for games that use each airport once (the others go by the counts
     /// the search in [`Network::puzzle_ends`] makes for many ends at once).
     fn deals(&self, net: &Network, start: usize, end: usize) -> bool {
         letters_apart(net.code(start), net.code(end)) == 3 && {
             let routes = net.routes_once(start, end, 2);
-            routes.len() == 2
-                && self
-                    .hop_limit()
-                    .is_none_or(|max| routes[0].stops.len() - 1 <= max)
+            routes.len() == 2 && self.hop_range().contains(routes[0].stops.len() - 1)
         }
     }
 
@@ -273,7 +336,7 @@ impl Rules {
             if letters_apart(ca, cb) != 3 {
                 return Err(format!("{ca} and {cb} must differ in every letter"));
             }
-            // A fixed route has no hop limit, so only these two can rule it out.
+            // A fixed route has no hop limits, so only these two can rule it out.
             if !self.playable(net, a, b) {
                 let routes = if self.once_per_airport() {
                     net.routes_once(a, b, 1).len()
@@ -304,8 +367,8 @@ impl Rules {
     pub fn check(&self) -> Result<usize, String> {
         let net = self.network();
         let count = match self.fixed(net)? {
-            (None, None) => net.puzzle_count(self.hop_limit()),
-            (Some(a), None) | (None, Some(a)) => net.puzzle_ends(a, self.hop_limit()).len(),
+            (None, None) => net.puzzle_count(self.hop_range()),
+            (Some(a), None) | (None, Some(a)) => net.puzzle_ends(a, self.hop_range()).len(),
             (Some(_), Some(_)) => 1,
         };
         if count == 0 {
@@ -328,11 +391,11 @@ impl Rules {
             return self.deal_once(net, rng).ok_or_else(none);
         }
         match self.fixed(net)? {
-            (None, None) => net.random_puzzle(rng, self.hop_limit()).ok_or_else(none),
-            (Some(a), None) => pick(net.puzzle_ends(a, self.hop_limit()), rng)
+            (None, None) => net.random_puzzle(rng, self.hop_range()).ok_or_else(none),
+            (Some(a), None) => pick(net.puzzle_ends(a, self.hop_range()), rng)
                 .map(|b| (a, b))
                 .ok_or_else(none),
-            (None, Some(b)) => pick(net.puzzle_ends(b, self.hop_limit()), rng)
+            (None, Some(b)) => pick(net.puzzle_ends(b, self.hop_range()), rng)
                 .map(|a| (a, b))
                 .ok_or_else(none),
             (Some(a), Some(b)) => Ok((a, b)),
@@ -345,11 +408,11 @@ impl Rules {
         match self.fixed(net).ok()? {
             (Some(a), Some(b)) => Some((a, b)),
             (None, None) => (0..ONCE_DEAL_ATTEMPTS).find_map(|_| {
-                let (a, b) = net.random_puzzle(rng, self.hop_limit())?;
+                let (a, b) = net.random_puzzle(rng, self.hop_range())?;
                 self.deals(net, a, b).then_some((a, b))
             }),
             (Some(a), None) | (None, Some(a)) => {
-                let mut ends = net.puzzle_ends(a, self.hop_limit());
+                let mut ends = net.puzzle_ends(a, self.hop_range());
                 rng.shuffle(&mut ends);
                 // The ticket a hop gets depends on the trip so far, so a route
                 // doesn't read the same backwards: each pair is checked the way
@@ -364,30 +427,45 @@ impl Rules {
 
     /// Whether the map is drawn.
     pub const fn shows_map(&self) -> bool {
-        matches!(self.view, Difficulty::Easy | Difficulty::Medium)
+        self.view.map
     }
 
     /// Whether distances are shown while playing (they all are once a game ends).
     pub const fn shows_distances(&self) -> bool {
-        matches!(self.view, Difficulty::Easy)
+        self.view.distances
     }
 
     /// Whether arriving the long way says by how much.
     pub const fn shows_amount_over(&self) -> bool {
-        matches!(self.view, Difficulty::Easy | Difficulty::Medium)
+        self.view.amount_over
     }
 
     /// Whether hops show where they connect, before and after they're flown.
     pub const fn shows_connections(&self) -> bool {
-        !matches!(self.view, Difficulty::Pilot)
+        self.view.connections
     }
 
-    /// "up to 6 hops" or "any number of hops".
+    /// "up to 6 hops", "4 to 6 hops", "at least 5 hops", "5 hops" or "any
+    /// number of hops". A minimum of [`MIN_HOPS`] goes unsaid, since every
+    /// puzzle takes that many.
     pub fn hops_text(&self) -> String {
-        match self.hop_limit() {
-            Some(MIN_HOPS) => format!("{MIN_HOPS} hops"),
-            Some(n) => format!("up to {n} hops"),
-            None => "any number of hops".to_string(),
+        let HopRange { min, max } = self.hop_range();
+        let min = min.max(MIN_HOPS);
+        match max {
+            Some(n) if n == min => format!("{n} hops"),
+            Some(n) if min == MIN_HOPS => format!("up to {n} hops"),
+            Some(n) => format!("{min} to {n} hops"),
+            None if min == MIN_HOPS => "any number of hops".to_string(),
+            None => format!("at least {min} hops"),
+        }
+    }
+
+    /// The view, as the summary words it: "Hard view", or the parts of a view
+    /// no level has ("shows map and distances").
+    fn view_text(&self) -> String {
+        match self.view.level() {
+            Some(level) => format!("{level} view"),
+            None => format!("shows {}", self.view.parts()),
         }
     }
 
@@ -396,8 +474,8 @@ impl Rules {
         if self.fixed_route {
             let code = |c: &Option<Code>| c.as_ref().map_or("random", code_str).to_string();
             return format!(
-                "{} view, route {} → {}{}{}",
-                self.view,
+                "{}, route {} → {}{}{}",
+                self.view_text(),
                 code(&self.start),
                 code(&self.end),
                 if self.once_per_airport() {
@@ -409,8 +487,8 @@ impl Rules {
             );
         }
         format!(
-            "{} view, {}, up to {} connection{}{}{}",
-            self.view,
+            "{}, {}, up to {} connection{}{}{}",
+            self.view_text(),
             self.hops_text(),
             self.connections(),
             plural_s(self.connections()),
@@ -428,7 +506,10 @@ impl Rules {
 /// command line would.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedRules {
-    pub view: String,
+    pub view: SavedView,
+    /// Saved only when above [`MIN_HOPS`], so older saves (which predate it) have none.
+    #[serde(default = "min_hops", skip_serializing_if = "is_min_hops")]
+    pub min_hops: usize,
     pub max_hops: Option<usize>,
     pub max_connections: usize,
     pub show_places: bool,
@@ -443,6 +524,60 @@ pub struct SavedRules {
     pub reuse_connections: bool,
 }
 
+/// A saved view: its parts, or (in saves from before they could be set apart)
+/// the standard level whose view it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SavedView {
+    Level(String),
+    Parts {
+        map: bool,
+        distances: bool,
+        connections: bool,
+        amount_over: bool,
+    },
+}
+
+impl SavedView {
+    fn view(&self) -> Option<View> {
+        match *self {
+            Self::Level(ref name) => parse_enum(name)
+                .filter(|&d| d != Difficulty::Custom)
+                .map(View::of),
+            Self::Parts {
+                map,
+                distances,
+                connections,
+                amount_over,
+            } => Some(View {
+                map,
+                distances,
+                connections,
+                amount_over,
+            }),
+        }
+    }
+}
+
+impl From<View> for SavedView {
+    fn from(v: View) -> Self {
+        Self::Parts {
+            map: v.map,
+            distances: v.distances,
+            connections: v.connections,
+            amount_over: v.amount_over,
+        }
+    }
+}
+
+fn min_hops() -> usize {
+    MIN_HOPS
+}
+
+fn is_min_hops(n: &usize) -> bool {
+    *n == MIN_HOPS
+}
+
 fn yes() -> bool {
     true
 }
@@ -454,7 +589,8 @@ fn is_yes(b: &bool) -> bool {
 impl From<Rules> for SavedRules {
     fn from(r: Rules) -> Self {
         Self {
-            view: enum_name(r.view),
+            view: r.view.into(),
+            min_hops: r.min_hops,
             max_hops: r.max_hops,
             max_connections: r.max_connections,
             show_places: r.show_places,
@@ -469,26 +605,28 @@ impl From<Rules> for SavedRules {
 impl SavedRules {
     /// The rules, or `None` when the save holds settings this version can't play.
     pub fn rules(&self) -> Option<Rules> {
-        let view: Difficulty = parse_enum(&self.view)?;
-        let hops_ok = self
-            .max_hops
-            .is_none_or(|n| (MIN_HOPS..=MAX_HOPS).contains(&n));
+        let view = self.view.view()?;
+        let in_bounds = |n: usize| (MIN_HOPS..=MAX_HOPS).contains(&n);
+        let hops_ok = in_bounds(self.min_hops)
+            && self
+                .max_hops
+                .is_none_or(|n| in_bounds(n) && self.min_hops <= n);
         let code = |c: &Option<String>| match c {
             None => Some(None),
             Some(text) => parse_code(text).map(Some),
         };
         let (start, end) = (code(&self.start)?, code(&self.end)?);
-        (view != Difficulty::Custom && hops_ok && self.max_connections <= MAX_CONNECTIONS)
-            .then_some(Rules {
-                view,
-                max_hops: self.max_hops,
-                max_connections: self.max_connections,
-                show_places: self.show_places,
-                fixed_route: self.fixed_route,
-                start,
-                end,
-                reuse_connections: self.reuse_connections,
-            })
+        (hops_ok && self.max_connections <= MAX_CONNECTIONS).then_some(Rules {
+            view,
+            min_hops: self.min_hops,
+            max_hops: self.max_hops,
+            max_connections: self.max_connections,
+            show_places: self.show_places,
+            fixed_route: self.fixed_route,
+            start,
+            end,
+            reuse_connections: self.reuse_connections,
+        })
     }
 }
 
@@ -728,6 +866,10 @@ pub struct FlightOption {
 pub struct SavedGame {
     pub version: u32,
     pub units: String,
+    /// Whether the map draws hops as great circle curves (the default) rather
+    /// than straight.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub curves: bool,
     /// Settings for custom games.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom: Option<SavedRules>,
@@ -776,6 +918,8 @@ pub struct FlightsGame {
     /// The player's settings for custom games, kept for the next one.
     custom: Rules,
     units: Units,
+    /// The map's hops as great circle curves; display only, like the units.
+    curves: bool,
     daily_date: Option<String>,
     longer_arrivals: usize,
     status: Status,
@@ -821,6 +965,7 @@ impl FlightsGame {
             rules,
             custom,
             units,
+            curves: true,
             daily_date,
             longer_arrivals: 0,
             status: Status::Playing,
@@ -903,7 +1048,7 @@ impl FlightsGame {
         let rules = DAILY_DIFFICULTY.rules(custom);
         let net = net.unwrap_or_else(|| rules.network());
         let (start, end) = net
-            .daily_puzzle(utc_day, rules.hop_limit())
+            .daily_puzzle(utc_day, rules.hop_range())
             .expect("the daily level has puzzles");
         Self::with_puzzle(
             net,
@@ -933,14 +1078,18 @@ impl FlightsGame {
     pub fn reset(&mut self, new_difficulty: Option<Difficulty>) -> Result<(), PuzzleError> {
         let difficulty = new_difficulty.unwrap_or(self.difficulty);
         let net = self.network_for(difficulty.rules(self.custom));
+        let curves = self.curves;
         *self = Self::random(difficulty, self.custom, self.units, Some(net))?;
+        self.curves = curves;
         Ok(())
     }
 
     /// Starts today's UTC daily game (switching to [`DAILY_DIFFICULTY`]).
     pub fn start_daily(&mut self) {
         let net = self.network_for(DAILY_DIFFICULTY.rules(self.custom));
+        let curves = self.curves;
         *self = Self::daily_in(Some(net), dict::current_utc_days(), self.custom, self.units);
+        self.curves = curves;
     }
 
     pub fn difficulty(&self) -> Difficulty {
@@ -970,6 +1119,16 @@ impl FlightsGame {
     /// Changes the units distances are shown in. Display only, so mid-game is fine.
     pub fn set_units(&mut self, units: Units) {
         self.units = units;
+    }
+
+    /// Whether the map draws hops as great circle curves (else straight lines).
+    pub fn curves(&self) -> bool {
+        self.curves
+    }
+
+    /// Switches the map between curved and straight hops. Display only too.
+    pub fn set_curves(&mut self, curves: bool) {
+        self.curves = curves;
     }
 
     pub fn daily_date(&self) -> Option<&str> {
@@ -1249,12 +1408,13 @@ impl FlightsGame {
         units: Option<Units>,
         loaded: Loaded<SavedGame>,
     ) -> Result<(Self, Option<Notice>), PuzzleError> {
-        let (saved_units, saved_custom) = match &loaded {
+        let (saved_units, saved_custom, curves) = match &loaded {
             Loaded::Found(saved) => (
                 parse_enum(&saved.units),
                 saved.custom.as_ref().and_then(SavedRules::rules),
+                saved.curves,
             ),
-            _ => (None, None),
+            _ => (None, None, true),
         };
         let units = units.or(saved_units).unwrap_or_default();
         let custom = saved_custom.unwrap_or_default();
@@ -1270,6 +1430,7 @@ impl FlightsGame {
             }
         })?;
         game.units = units;
+        game.curves = curves;
         game.custom = custom;
         Ok((game, notice))
     }
@@ -1292,6 +1453,7 @@ impl FlightsGame {
         SavedGame {
             version: SAVE_VERSION,
             units: enum_name(self.units),
+            curves: self.curves,
             custom: Some(self.custom.into()),
             game,
         }

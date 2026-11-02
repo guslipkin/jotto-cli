@@ -112,6 +112,22 @@ pub fn for_view(lat_span: f64, rows: u16) -> &'static [Coastline] {
     &scales[i.min(scales.len() - 1)]
 }
 
+/// A longitude moved by whole turns to within 180° of `centre`, so a view
+/// past ±180° (one centred on the Pacific, say) finds what's there.
+pub fn wrap_lon(lon: f64, centre: f64) -> f64 {
+    lon - ((lon - centre) / 360.0).round() * 360.0
+}
+
+/// The whole turns (in degrees) to shift the world by so every copy of it that
+/// a view could show is drawn: the map goes round, with no edge at ±180°.
+/// Covers anything between -360° and 360°, as a hop taken the short way across
+/// the antimeridian can reach.
+pub fn turns((x0, x1, _, _): Bounds) -> impl Iterator<Item = f64> {
+    let first = ((x0 - 360.0) / 360.0).ceil() as i32;
+    let last = ((x1 + 360.0) / 360.0).floor() as i32;
+    (first..=last).map(|k| f64::from(k) * 360.0)
+}
+
 /// The part of the line from `a` to `b` inside `bounds` (Liang-Barsky), since
 /// the canvas drops a line with either end outside its bounds, which a zoomed
 /// view would otherwise do to every line running off its edge.
@@ -157,14 +173,17 @@ pub struct Coast<'a> {
 impl Shape for Coast<'_> {
     fn draw(&self, painter: &mut Painter) {
         let (x0, x1, y0, y1) = self.bounds;
-        for line in self.lines {
-            let (bx0, bx1, by0, by1) = line.bbox;
-            if bx1 < x0 || bx0 > x1 || by1 < y0 || by0 > y1 {
-                continue;
-            }
-            for (a, b) in line.points().zip(line.points().skip(1)) {
-                if let Some(((ax, ay), (bx, by))) = clip(a, b, self.bounds) {
-                    CanvasLine::new(ax, ay, bx, by, self.color).draw(painter);
+        for turn in turns(self.bounds) {
+            for line in self.lines {
+                let (bx0, bx1, by0, by1) = line.bbox;
+                if bx1 + turn < x0 || bx0 + turn > x1 || by1 < y0 || by0 > y1 {
+                    continue;
+                }
+                let shifted = line.points().map(|(x, y)| (x + turn, y));
+                for (a, b) in shifted.clone().zip(shifted.skip(1)) {
+                    if let Some(((ax, ay), (bx, by))) = clip(a, b, self.bounds) {
+                        CanvasLine::new(ax, ay, bx, by, self.color).draw(painter);
+                    }
                 }
             }
         }

@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use crate::flights::data::MAX_CONNECTIONS;
 use crate::flights::game::{
-    code_str, parse_code, Code, Difficulty, FlightsGame, FlyOutcome, Rules, Status, Units,
+    code_str, parse_code, Code, Difficulty, FlightsGame, FlyOutcome, Rules, Status, Units, View,
     MAX_HOPS, MIN_HOPS,
 };
 use crate::line_input::LineReader;
@@ -168,13 +168,30 @@ fn print_settings(game: &FlightsGame) {
     println!("Settings (':set <setting> <value>' changes one):");
     println!("  units        {:<10} nm, mi or km", game.units().label());
     println!("Custom game (':new custom' plays one):");
+    let on = |b: bool| if b { "on" } else { "off" };
     println!(
-        "  view         {:<10} easy, medium, hard or pilot: what's shown",
+        "  view         {:<10} easy, medium, hard or pilot: sets the four below as that level does",
         c.view.label().to_ascii_lowercase()
     );
     println!(
+        "  map          {:<10} on or off: the map (in the TUI)",
+        on(c.view.map)
+    );
+    println!(
+        "  distances    {:<10} on or off: distances while playing",
+        on(c.view.distances)
+    );
+    println!(
+        "  via          {:<10} on or off: where hops connect",
+        on(c.view.connections)
+    );
+    println!(
+        "  over         {:<10} on or off: how far over the shortest route an arrival was",
+        on(c.view.amount_over)
+    );
+    println!(
         "  places       {:<10} on or off: city and country beside options",
-        if c.show_places { "on" } else { "off" }
+        on(c.show_places)
     );
     println!(
         "  mode         {:<10} random (within the limits below) or route (your start and end)",
@@ -197,7 +214,12 @@ fn print_settings(game: &FlightsGame) {
         }
     );
     println!(
-        "  hops         {:<10} {MIN_HOPS} to {MAX_HOPS}, or none: hops in the shortest route{}",
+        "  minhops      {:<10} {MIN_HOPS} to {MAX_HOPS}: fewest hops in the shortest route{}",
+        c.min_hops,
+        unused(!c.fixed_route)
+    );
+    println!(
+        "  maxhops      {:<10} {MIN_HOPS} to {MAX_HOPS}, or none: most hops in the shortest route{}",
         c.max_hops.map_or("none".to_string(), |n| n.to_string()),
         unused(!c.fixed_route)
     );
@@ -231,12 +253,16 @@ fn set(game: &mut FlightsGame, arg: &str) -> Result<(), String> {
     match name {
         "units" | "unit" => game.set_units(Units::from_str(value)?),
         "view" | "level" | "shows" => {
-            let view = Difficulty::from_str(value)?;
-            if view == Difficulty::Custom {
+            let level = Difficulty::from_str(value)?;
+            if level == Difficulty::Custom {
                 return Err("Choose a view: easy, medium, hard or pilot.".to_string());
             }
-            c.view = view;
+            c.view = View::of(level);
         }
+        "map" => c.view.map = on_off("Map", value)?,
+        "distances" | "distance" => c.view.distances = on_off("Distances", value)?,
+        "via" | "showconnections" => c.view.connections = on_off("Via", value)?,
+        "over" | "howfar" => c.view.amount_over = on_off("Over", value)?,
         "mode" => {
             c.fixed_route = match value {
                 "route" | "fixed" => true,
@@ -253,18 +279,23 @@ fn set(game: &mut FlightsGame, arg: &str) -> Result<(), String> {
                 .filter(|&n| n <= MAX_CONNECTIONS)
                 .ok_or(format!("Connections must be 0 to {MAX_CONNECTIONS}."))?;
         }
-        "hops" | "maxhops" => {
+        // "hops 6" sets the most, as it did before there was a least; "hops 4-6"
+        // or "hops 5-none" sets both.
+        "hops" | "maxhops" | "minhops" => {
             c.fixed_route = false;
-            c.max_hops = match value {
-                "none" | "any" | "no" | "unlimited" => None,
-                _ => Some(
-                    value
-                        .parse()
-                        .ok()
-                        .filter(|n| (MIN_HOPS..=MAX_HOPS).contains(n))
-                        .ok_or(format!("Hops must be {MIN_HOPS} to {MAX_HOPS}, or none."))?,
-                ),
+            let (min, max) = match (name, value.split_once('-')) {
+                ("hops", Some((min, max))) => (Some(hops(min)?), Some(max_hops(max)?)),
+                ("minhops", _) => (Some(hops(value)?), None),
+                _ => (None, Some(max_hops(value)?)),
             };
+            let (min, max) = (min.unwrap_or(c.min_hops), max.unwrap_or(c.max_hops));
+            if max.is_some_and(|max| min > max) {
+                return Err(format!(
+                    "Min hops ({min}) can't be more than max hops ({}).",
+                    max.unwrap_or_default()
+                ));
+            }
+            (c.min_hops, c.max_hops) = (min, max);
         }
         "reuse" | "repeat" => {
             c.reuse_connections = match value {
@@ -273,13 +304,7 @@ fn set(game: &mut FlightsGame, arg: &str) -> Result<(), String> {
                 _ => return Err("Reuse must be yes or no.".to_string()),
             };
         }
-        "places" | "cities" | "city" => {
-            c.show_places = match value {
-                "on" | "yes" | "true" | "show" => true,
-                "off" | "no" | "false" | "hide" => false,
-                _ => return Err("Places must be on or off.".to_string()),
-            };
-        }
+        "places" | "cities" | "city" => c.show_places = on_off("Places", value)?,
         "start" | "from" | "end" | "to" => {
             let code = match value {
                 "random" | "none" | "any" => None,
@@ -303,6 +328,35 @@ fn set(game: &mut FlightsGame, arg: &str) -> Result<(), String> {
     }
     game.set_custom(c);
     Ok(())
+}
+
+/// An on / off setting's value.
+fn on_off(setting: &str, value: &str) -> Result<bool, String> {
+    match value {
+        "on" | "yes" | "true" | "show" => Ok(true),
+        "off" | "no" | "false" | "hide" => Ok(false),
+        _ => Err(format!("{setting} must be on or off.")),
+    }
+}
+
+/// A min or max hops value.
+fn hops(value: &str) -> Result<usize, String> {
+    value
+        .trim()
+        .parse()
+        .ok()
+        .filter(|n| (MIN_HOPS..=MAX_HOPS).contains(n))
+        .ok_or(format!("Hops must be {MIN_HOPS} to {MAX_HOPS}."))
+}
+
+/// A max hops value, which may also be no limit.
+fn max_hops(value: &str) -> Result<Option<usize>, String> {
+    match value.trim() {
+        "none" | "any" | "no" | "unlimited" => Ok(None),
+        n => hops(n)
+            .map(Some)
+            .map_err(|_| format!("Max hops must be {MIN_HOPS} to {MAX_HOPS}, or none.")),
+    }
 }
 
 fn print_over() {
@@ -472,7 +526,7 @@ fn print_help(game: &FlightsGame) {
     println!("  :units [nm|mi|km]    Show or change distance units");
     println!("  :settings            Show the units and custom game settings");
     println!("  :defaults            Put the custom game settings back to their defaults");
-    println!("  :set <name> <value>  Change a setting (':set hops 6', ':set start LAX')");
+    println!("  :set <name> <value>  Change a setting (':set hops 4-6', ':set map off')");
     println!("  :giveup              Reveal a shortest route");
     println!("  :credits             Show credits");
     println!("  :quit                Exit FLIGHTS");
