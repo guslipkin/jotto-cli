@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+
 use clap::{CommandFactory, FromArgMatches, Parser};
 
 use crate::game::{Difficulty, GameMode};
@@ -26,14 +28,15 @@ pub struct CliArgs {
 }
 
 impl CliArgs {
-    /// Parses CLI arguments configured for the given `GameMode` (`jotto` or `wordle`).
-    pub fn parse_for_mode(mode: GameMode) -> Self {
+    /// Parses `args` (the program's name first) as the given `GameMode`'s command
+    /// (`jotto` or `wordle`).
+    pub fn parse_for_mode(mode: GameMode, args: impl IntoIterator<Item = OsString>) -> Self {
         let about = match mode {
             GameMode::Jotto => "A CLI version of the classic Jotto 5-letter word game.",
             GameMode::Wordle => "A CLI version of the classic Wordle 5-letter word game.",
         };
         let cmd = Self::command().name(mode.command_name()).about(about);
-        let matches = cmd.get_matches();
+        let matches = cmd.get_matches_from(args);
         Self::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
     }
 }

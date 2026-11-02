@@ -101,23 +101,23 @@ jobs:
           fi
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CLANG" >> "$GITHUB_ENV"
 
-      - name: Build release binaries (pulls fresh SCOWL word list)
-        run: cargo build --release --bins --target ${{ matrix.target }}
+      # Only `arcade` ships: it has all four games in it, and answers to each
+      # game's name, so the installers make `flights`, `jotto`, `wordle` and
+      # `contexto` as links to it rather than downloading four more copies of the
+      # same games. The standalone binaries stay for `cargo install`.
+      - name: Build release binary (pulls fresh SCOWL word list)
+        run: cargo build --release --bin arcade --target ${{ matrix.target }}
 
       - name: Package Unix archive
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/jotto" "dist/jotto-${{ matrix.asset_name }}"
-          cp "target/${{ matrix.target }}/release/wordle" "dist/wordle-${{ matrix.asset_name }}"
-          cp "target/${{ matrix.target }}/release/contexto" "dist/contexto-${{ matrix.asset_name }}"
-          cp "target/${{ matrix.target }}/release/flights" "dist/flights-${{ matrix.asset_name }}"
           cp "target/${{ matrix.target }}/release/arcade" "dist/arcade-${{ matrix.asset_name }}"
-          chmod +x "dist/jotto-${{ matrix.asset_name }}" "dist/wordle-${{ matrix.asset_name }}" "dist/contexto-${{ matrix.asset_name }}" "dist/flights-${{ matrix.asset_name }}" "dist/arcade-${{ matrix.asset_name }}"
+          chmod +x "dist/arcade-${{ matrix.asset_name }}"
           staging="jotto-${{ matrix.asset_name }}"
           mkdir -p "$staging"
-          cp "target/${{ matrix.target }}/release/jotto" "target/${{ matrix.target }}/release/wordle" "target/${{ matrix.target }}/release/contexto" "target/${{ matrix.target }}/release/flights" "target/${{ matrix.target }}/release/arcade" "$staging/"
+          cp "target/${{ matrix.target }}/release/arcade" "$staging/"
           cp README.md LICENSE LICENSE.SCOWL "$staging/"
           tar -czf "dist/jotto-${{ matrix.asset_name }}.tar.gz" "$staging"
 
@@ -126,14 +126,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/jotto.exe" "dist/jotto-${{ matrix.asset_name }}.exe"
-          Copy-Item "target/${{ matrix.target }}/release/wordle.exe" "dist/wordle-${{ matrix.asset_name }}.exe"
-          Copy-Item "target/${{ matrix.target }}/release/contexto.exe" "dist/contexto-${{ matrix.asset_name }}.exe"
-          Copy-Item "target/${{ matrix.target }}/release/flights.exe" "dist/flights-${{ matrix.asset_name }}.exe"
           Copy-Item "target/${{ matrix.target }}/release/arcade.exe" "dist/arcade-${{ matrix.asset_name }}.exe"
           $staging = "jotto-${{ matrix.asset_name }}"
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/jotto.exe", "target/${{ matrix.target }}/release/wordle.exe", "target/${{ matrix.target }}/release/contexto.exe", "target/${{ matrix.target }}/release/flights.exe", "target/${{ matrix.target }}/release/arcade.exe" "$staging/"
+          Copy-Item "target/${{ matrix.target }}/release/arcade.exe" "$staging/"
           Copy-Item README.md, LICENSE, LICENSE.SCOWL "$staging/"
           Compress-Archive -Path "$staging/*" -DestinationPath "dist/jotto-${{ matrix.asset_name }}.zip"
 

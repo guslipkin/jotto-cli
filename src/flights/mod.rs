@@ -53,9 +53,9 @@ pub fn play() -> Result<(), String> {
     )
 }
 
-/// CLI entrypoint for the `flights` binary.
-pub fn run_cli() {
-    let args = FlightsArgs::parse();
+/// CLI entrypoint for `flights`, given its command line (the program's name first).
+pub fn run_cli(args: impl IntoIterator<Item = std::ffi::OsString>) {
+    let args = FlightsArgs::parse_from(args);
     crate::run_command(
         "flights",
         // Either --route, or custom settings (from the save) that fit no puzzle.

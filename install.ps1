@@ -6,7 +6,10 @@
 $ErrorActionPreference = 'Stop'
 
 $Repo = "guslipkin/jotto-cli"
-$Binaries = @("jotto.exe", "wordle.exe", "contexto.exe", "flights.exe", "arcade.exe")
+# The games' commands: in a release, hard links to arcade.exe, which has all four
+# in it and runs as whichever game it's named after. (Hard links, not symbolic
+# ones, since those need administrator rights or Developer Mode on Windows.)
+$Games = @("jotto.exe", "wordle.exe", "contexto.exe", "flights.exe")
 $InstallDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $HOME ".local\bin" }
 $Version = if ($env:VERSION) { $env:VERSION } else { "latest" }
 $AssetName = "windows-x86_64"
@@ -53,11 +56,38 @@ try {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
     $Installed = @()
-    foreach ($Bin in $Binaries) {
-        $Found = Get-ChildItem -Path $ExtractDir -Filter $Bin -Recurse -File | Select-Object -First 1
+    $Find = { param($Name) Get-ChildItem -Path $ExtractDir -Filter $Name -Recurse -File | Select-Object -First 1 }
+    $Arcade = & $Find "arcade.exe"
+    $ArcadePath = Join-Path $InstallDir "arcade.exe"
+    if ($Arcade) {
+        # The old games' links first, so replacing arcade.exe doesn't write
+        # through them.
+        foreach ($Bin in $Games) {
+            Remove-Item -Path (Join-Path $InstallDir $Bin) -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -Path $ArcadePath -Force -ErrorAction SilentlyContinue
+        Copy-Item -Path $Arcade.FullName -Destination $ArcadePath -Force
+        $Installed += "arcade.exe"
+    }
+
+    # Older releases shipped a binary per game (and before v0.0.5, no arcade);
+    # those are copied as they are.
+    foreach ($Bin in $Games) {
+        $Dest = Join-Path $InstallDir $Bin
+        $Found = & $Find $Bin
         if ($Found) {
-            Copy-Item -Path $Found.FullName -Destination (Join-Path $InstallDir $Bin) -Force
+            # Removed first, as it may be a link to an installed arcade.exe.
+            Remove-Item -Path $Dest -Force -ErrorAction SilentlyContinue
+            Copy-Item -Path $Found.FullName -Destination $Dest -Force
             $Installed += $Bin
+        } elseif ($Arcade) {
+            try {
+                New-Item -ItemType HardLink -Path $Dest -Target $ArcadePath -Force | Out-Null
+            } catch {
+                # A drive without hard links (FAT32, say) gets a copy.
+                Copy-Item -Path $ArcadePath -Destination $Dest -Force
+            }
+            $Installed += "$Bin (-> arcade.exe)"
         }
     }
 

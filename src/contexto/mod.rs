@@ -48,9 +48,9 @@ pub fn play() -> Result<(), String> {
     )
 }
 
-/// CLI entrypoint for the `contexto` binary.
-pub fn run_cli() {
-    let args = ContextoArgs::parse();
+/// CLI entrypoint for `contexto`, given its command line (the program's name first).
+pub fn run_cli(args: impl IntoIterator<Item = std::ffi::OsString>) {
+    let args = ContextoArgs::parse_from(args);
     crate::run_command(
         "contexto",
         "Error initializing game with custom word",

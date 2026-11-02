@@ -9,6 +9,8 @@ set -eu
 
 REPO="guslipkin/jotto-cli"
 BINARIES="jotto wordle contexto flights arcade"
+# The games' commands: in a release, links to arcade, which has all four in it.
+GAMES="jotto wordle contexto flights"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${VERSION:-latest}"
 FROM_SOURCE=0
@@ -217,12 +219,30 @@ STAGING_DIR="$TMP_DIR/jotto-${ASSET_NAME}"
 mkdir -p "$INSTALL_DIR"
 
 INSTALLED=""
-for bin in $BINARIES; do
+if [ -f "$STAGING_DIR/arcade" ]; then
+    rm -f "$INSTALL_DIR/arcade"
+    cp "$STAGING_DIR/arcade" "$INSTALL_DIR/arcade"
+    chmod 755 "$INSTALL_DIR/arcade"
+    INSTALLED=" arcade"
+fi
+
+# arcade runs as whichever game it's named after, so each game's command is a
+# link to it. Older releases shipped a binary per game (and before v0.0.5, no
+# arcade); those are copied as they are.
+for bin in $GAMES; do
     if [ -f "$STAGING_DIR/$bin" ]; then
         rm -f "$INSTALL_DIR/$bin"
         cp "$STAGING_DIR/$bin" "$INSTALL_DIR/$bin"
         chmod 755 "$INSTALL_DIR/$bin"
         INSTALLED="$INSTALLED $bin"
+    elif [ -f "$STAGING_DIR/arcade" ]; then
+        rm -f "$INSTALL_DIR/$bin"
+        # A relative link, so it still finds arcade if the folder is moved; a
+        # copy where links aren't supported.
+        if ! ln -s arcade "$INSTALL_DIR/$bin" 2>/dev/null; then
+            cp "$INSTALL_DIR/arcade" "$INSTALL_DIR/$bin"
+        fi
+        INSTALLED="$INSTALLED $bin(->arcade)"
     fi
 done
 

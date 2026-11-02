@@ -76,9 +76,10 @@ pub(crate) fn play_saved<S: serde::de::DeserializeOwned, G, E: Display>(
     }
 }
 
-/// Shared CLI entrypoint for both `jotto` and `wordle` binaries.
-pub fn run_cli(mode: GameMode) {
-    let args = CliArgs::parse_for_mode(mode);
+/// Shared CLI entrypoint for `jotto` and `wordle`, given their command line (the
+/// program's name first). It's passed in so `arcade jotto ...` can run it too.
+pub fn run_cli(mode: GameMode, args: impl IntoIterator<Item = std::ffi::OsString>) {
+    let args = CliArgs::parse_for_mode(mode, args);
     run_command(
         mode.command_name(),
         "Error initializing game with custom word",

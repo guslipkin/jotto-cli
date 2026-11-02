@@ -1,6 +1,6 @@
 # Flights, Jotto, Wordle & Contexto CLI
 
-Fast, lightweight Rust CLI games: **Flights**, an original game created by Gus Lipkin, in which you hop from one airport to another by changing one letter of its code at a time, by the shortest distance; versions of the classic **Jotto** and **Wordle** 5-letter word games (ported from [`guslipkin/jotto`](https://github.com/guslipkin/jotto)); and **Contexto**, an unofficial version of [Contexto](https://contexto.me/), a game of finding a word by its meaning. Installing this crate provides the `flights`, `jotto`, `wordle` and `contexto` commands, and `arcade`, all four in one program, chosen from a menu.
+Fast, lightweight Rust CLI games: **Flights**, an original game created by Gus Lipkin, in which you hop from one airport to another by changing one letter of its code at a time, by the shortest distance; versions of the classic **Jotto** and **Wordle** 5-letter word games (ported from [`guslipkin/jotto`](https://github.com/guslipkin/jotto)); and **Contexto**, an unofficial version of [Contexto](https://contexto.me/), a game of finding a word by its meaning. Installing them provides the `flights`, `jotto`, `wordle` and `contexto` commands, and `arcade`, all four in one program, chosen from a menu. The installers and releases ship `arcade` alone: it runs as whichever game it's named after, so each game's command is a link to it.
 
 ## Rules
 
@@ -67,16 +67,23 @@ Contexto asks you to find a secret word by its meaning:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/guslipkin/jotto-cli/main/install.sh | sh
 ```
-*(Installs `flights`, `jotto`, `wordle`, `contexto`, and `arcade` to `~/.local/bin` by default; pass `-s -- --bin-dir /usr/local/bin` or set `INSTALL_DIR` to customize.)*
+*(Installs `arcade` to `~/.local/bin` by default, with `flights`, `jotto`, `wordle` and `contexto` as symbolic links to it; pass `-s -- --bin-dir /usr/local/bin` or set `INSTALL_DIR` to customize. `--from-source` builds with `cargo` instead, as below.)*
 
 **Windows (PowerShell):**
 ```powershell
 irm https://raw.githubusercontent.com/guslipkin/jotto-cli/main/install.ps1 | iex
 ```
+*(Installs `arcade.exe` to `~\.local\bin`, or `$env:INSTALL_DIR`, with `flights.exe`, `jotto.exe`, `wordle.exe` and `contexto.exe` as hard links to it, and adds the folder to your user `PATH`.)*
+
+Either one also installs an older release as that release shipped it (`install.sh --version v0.0.4`, or `VERSION=v0.0.4` for either), including those from before `arcade` (v0.0.5) with a binary per game.
 
 ### Pre-built Binaries
 
-Download the latest `flights`, `jotto`, `wordle`, `contexto` and `arcade` binaries for Linux, macOS, or Windows from the [GitHub Releases](https://github.com/guslipkin/jotto-cli/releases) page.
+Download the latest `arcade` binary for Linux, macOS, Android or Windows from the [GitHub Releases](https://github.com/guslipkin/jotto-cli/releases) page. It has all four games in it: run under a game's name (a link or copy of it called `flights`, say, or `flights.exe` on Windows) it is that game's command, and `arcade flights` does the same (see [Usage](#usage)). For example, on Linux or macOS:
+
+```bash
+for game in flights jotto wordle contexto; do ln -s arcade "$game"; done
+```
 
 ### Build from Source
 
@@ -85,6 +92,8 @@ Requires Rust (`cargo`), `git`, and Python 3 (for SCOWL database creation at bui
 ```bash
 cargo install --path .
 ```
+
+This builds and installs all five as programs of their own (`flights`, `jotto`, `wordle`, `contexto` and `arcade`), rather than `arcade` with links to it.
 
 ### Play in a Browser (Docker)
 
@@ -121,6 +130,11 @@ contexto
 # it, and quitting it returns to your shell. Games resume and save just as their own commands do.
 arcade
 arcade --session-saves   # saves kept for this run only, then removed (as the Docker image does)
+
+# Or play one directly through arcade, with any of that game's options below
+# (the same as running `flights --plain`, and how the linked commands work)
+arcade flights --plain
+arcade wordle --daily
 
 # Launch the deterministic UTC Daily Challenge
 flights --daily
