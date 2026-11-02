@@ -1996,14 +1996,14 @@ fn draw_settings(f: &mut Frame, page: &SettingsPage) {
     let on = |b: bool| if b { "On" } else { "Off" }.to_string();
     let value = |setting: Setting| -> (String, &'static str) {
         match setting {
-            Setting::Units => (page.units.label().to_string(), "distance units"),
+            // The preferences say their defaults, since Reset leaves them be.
+            Setting::Units => (
+                page.units.label().to_string(),
+                "distance units (Default: nm)",
+            ),
             Setting::Lines => (
                 if page.curves { "Curved" } else { "Straight" }.to_string(),
-                if page.curves {
-                    "great circles, as flights fly"
-                } else {
-                    "straight across the map"
-                },
+                "the hops' shape (Default: Curved)",
             ),
             Setting::View => (
                 c.view.label().to_string(),
