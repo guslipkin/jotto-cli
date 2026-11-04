@@ -13,10 +13,15 @@
 //! opened.
 //!
 //! The secret is stored base64-encoded: not hidden, just not readable at a glance.
+//!
+//! In the Docker image, a session's saves are thrown away when it ends, so they
+//! are also kept in the player's browser (see [`mirror_to_browser`]): the
+//! terminal carries them, as escape sequences the image's page answers.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::ValueEnum;
 use serde::de::DeserializeOwned;
@@ -324,6 +329,49 @@ pub fn start<S, G: Saveable, E>(
     Ok((new_game()?, notice))
 }
 
+/// The private OSC (operating system command) number saves travel under between
+/// a game and the Docker image's page, which keeps them in the browser.
+pub const BROWSER_OSC: u32 = 7681;
+
+/// Asks the page for the saves it kept: `ESC ] 7681 ; load BEL`. The page types
+/// back `saves:` and the saves file, base64, then Enter (see `docker/`).
+pub const BROWSER_LOAD: &str = "\x1b]7681;load\x07";
+
+/// Whether each write of a section is also sent to the page.
+static MIRROR: AtomicBool = AtomicBool::new(false);
+
+/// From now on, every section written is also sent to the terminal as
+/// `ESC ] 7681 ; save ; <game> ; <base64 section> BEL`, for the page to keep.
+/// A section at a time, not the file, so two tabs playing different games
+/// don't overwrite each other's. A terminal that doesn't know the sequence
+/// ignores it.
+pub fn mirror_to_browser() {
+    MIRROR.store(true, Ordering::Relaxed);
+}
+
+/// Sends a written section to the page. Written whole and flushed at once, so
+/// it lands between the frames the game draws, never inside one.
+fn send_to_browser(name: &str, section: &str) -> io::Result<()> {
+    let mut out = io::stdout().lock();
+    write!(
+        out,
+        "\x1b]{BROWSER_OSC};save;{name};{}\x07",
+        encode(section)
+    )?;
+    out.flush()
+}
+
+/// Writes saves the page kept from earlier sessions into `dir`'s saves file,
+/// if they're an object of sections, as the file is (whatever's in each is
+/// checked by its game when it loads). Says whether it did.
+pub fn restore(dir: &Path, json: &str) -> bool {
+    let Ok(sections) = serde_json::from_str::<Sections>(json) else {
+        return false;
+    };
+    let text = serde_json::to_string_pretty(&sections).expect("saves serialize");
+    write_atomically(&dir.join(SAVES_FILE), &text).is_ok()
+}
+
 /// Keeps one game's section of the saves file in step with the game:
 /// [`Autosave::sync`] after each change writes it only if what it would save is
 /// different.
@@ -379,6 +427,10 @@ impl Autosave {
         let text = serde_json::to_string_pretty(&sections).expect("saves serialize");
         match write_atomically(&path, &text) {
             Ok(()) => {
+                if MIRROR.load(Ordering::Relaxed) {
+                    // Lost only from the browser; the session's file has it.
+                    let _ = send_to_browser(&slot.name, &json);
+                }
                 self.last = json;
                 self.error = None;
                 // Once a session, after the first save made sure the folder exists.
@@ -449,6 +501,35 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ndt-save-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn restores_saves_the_browser_kept() {
+        let dir = temp_dir("restore");
+        let slot = Slot::new(&dir, "wordle");
+        // Only an object of sections, as the file is.
+        assert!(!restore(&dir, "[1, 2]"));
+        assert!(!restore(&dir, "not json"));
+        assert!(matches!(load::<Saved>(&slot), Loaded::Missing));
+        let json =
+            format!(r#"{{"wordle":{{"version":{SAVE_VERSION},"words":["crane"]}},"other":{{}}}}"#);
+        assert!(restore(&dir, &json));
+        match load::<Saved>(&slot) {
+            Loaded::Found(saved) => assert_eq!(saved.words, vec!["crane".to_string()]),
+            other => panic!("{other:?}"),
+        }
+        // A game's next write keeps the other sections.
+        let mut autosave = Autosave::new(Some(slot.clone()));
+        autosave.sync(&Saved {
+            version: SAVE_VERSION,
+            words: vec!["slate".into()],
+        });
+        let text = fs::read_to_string(slot.file()).unwrap();
+        assert!(
+            text.contains("slate") && text.contains("\"other\""),
+            "{text}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

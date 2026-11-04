@@ -15,13 +15,16 @@
 //! program, with `--session-saves`: each session then keeps its saves in a folder
 //! of its own, removed when it ends, so players connected at once never share or
 //! keep each other's games. Since the games run inside it, it never starts
-//! another program, so nothing a player does reaches a command line.
+//! another program, so nothing a player does reaches a command line. With
+//! `--browser-saves` as well, the saves outlive the session in the player's
+//! browser: the image's page hands them over when a session starts, and keeps
+//! each one written (see [`load_browser_saves`] and [`jotto::save`]).
 
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
 use clap::{Args, FromArgMatches, Parser, Subcommand};
@@ -44,6 +47,11 @@ struct ArcadeArgs {
     /// instead of ~/.ndt (what the Docker image does, so players don't share them)
     #[arg(long)]
     session_saves: bool,
+
+    /// With --session-saves, keep the saves in the browser too, between sessions
+    /// (what the Docker image's page does; elsewhere it only waits a moment)
+    #[arg(long, requires = "session_saves")]
+    browser_saves: bool,
 
     /// Play one game directly, as its own command would, instead of the menu
     #[command(subcommand)]
@@ -193,6 +201,55 @@ impl Drop for SessionDir {
     }
 }
 
+/// How long to wait for the page's saves. It answers at once (the session only
+/// starts once the page is connected), so this is for a terminal that never
+/// will, as one other than the image's page won't.
+const BROWSER_WAIT: Duration = Duration::from_secs(3);
+
+/// Most a reply can be, base64 included: far more than the four games' saves
+/// ever take, but a bound on what's kept in memory.
+const MAX_BROWSER_REPLY: usize = 4 << 20;
+
+/// Asks the page for the saves it kept and writes them into `dir`, before the
+/// menu opens. The page answers as if typed: `saves:`, the saves file in base64,
+/// and Enter, read here as keys (raw, so nothing is echoed); anything typed
+/// before it is ignored. No answer, or one that isn't a saves file, starts the
+/// session with none, as without the flag.
+fn load_browser_saves(dir: &Path) -> io::Result<()> {
+    crossterm::terminal::enable_raw_mode()?;
+    let reply = ask_browser();
+    crossterm::terminal::disable_raw_mode()?;
+    if let Some(json) = reply?.as_deref().and_then(jotto::save::decode) {
+        jotto::save::restore(dir, &json);
+    }
+    Ok(())
+}
+
+/// The page's answer, base64, if it sends a whole one in time.
+fn ask_browser() -> io::Result<Option<String>> {
+    let mut out = io::stdout();
+    out.write_all(jotto::save::BROWSER_LOAD.as_bytes())?;
+    out.flush()?;
+    let deadline = Instant::now() + BROWSER_WAIT;
+    let mut typed = String::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || !crossterm::event::poll(left)? || typed.len() > MAX_BROWSER_REPLY {
+            return Ok(None);
+        }
+        if let Event::Key(key) = crossterm::event::read()? {
+            match key.code {
+                KeyCode::Char(c) => typed.push(c),
+                KeyCode::Enter => break,
+                _ => {}
+            }
+        }
+    }
+    Ok(typed
+        .rfind("saves:")
+        .map(|at| typed[at + "saves:".len()..].to_string()))
+}
+
 fn main() -> io::Result<()> {
     // Run under a game's name, this is that game's command, options and all.
     if let Some(game) = env::args_os().next().as_deref().and_then(game_named) {
@@ -215,6 +272,10 @@ fn main() -> io::Result<()> {
         let dir = SessionDir::create()?;
         // Read by each game's save code; set before anything else runs.
         env::set_var("NDT_SAVE_DIR", &dir.0);
+        if args.browser_saves {
+            load_browser_saves(&dir.0)?;
+            jotto::save::mirror_to_browser();
+        }
         Some(dir)
     } else {
         None
@@ -514,6 +575,11 @@ mod tests {
         let args = ArcadeArgs::try_parse_from(["arcade", "--session-saves"]).unwrap();
         assert!(args.session_saves && args.game.is_none());
         assert!(ArcadeArgs::try_parse_from(["arcade", "--session-saves", "jotto"]).is_err());
+        // Browser saves are a session's, so they need --session-saves.
+        let args =
+            ArcadeArgs::try_parse_from(["arcade", "--session-saves", "--browser-saves"]).unwrap();
+        assert!(args.browser_saves);
+        assert!(ArcadeArgs::try_parse_from(["arcade", "--browser-saves"]).is_err());
         assert!(ArcadeArgs::try_parse_from(["arcade", "chess"]).is_err());
     }
 

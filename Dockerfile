@@ -6,7 +6,9 @@
 # starts a fresh `arcade` for every tab that connects. It's the only thing a
 # session runs: all four games are built into it, it plays the chosen one's TUI,
 # comes back to its menu when the game exits, and ends the session on Quit. With
-# --session-saves, each session's saves are its own and gone when it ends. The
+# --session-saves, each session's saves are its own and gone when it ends; with
+# --browser-saves, they're also kept in the player's browser (its localStorage,
+# by docker/browser-saves.js in the page), so the next session picks them up. The
 # image has nothing else in it (it's built FROM scratch: no shell, no other
 # programs), so there's no command line to reach, from the browser or from
 # `docker exec`.
@@ -57,6 +59,16 @@ RUN set -eu; \
     grep -q 'overflow-y:hidden!important' /ttyd/index.html; \
     grep -q 'dispatchEvent(new Event("resize"))' /ttyd/index.html
 
+# And the script keeping saves in the browser, inserted as it is (from a file, as
+# it's too long to quote here) before the page's first </head>.
+COPY docker/browser-saves.js /ttyd/browser-saves.js
+RUN set -eu; \
+    awk 'BEGIN { s = "<script>"; while ((getline line < "/ttyd/browser-saves.js") > 0) s = s line "\n"; s = s "</script>" } \
+         !done && (i = index($0, "</head>")) { $0 = substr($0, 1, i - 1) s substr($0, i); done = 1 } \
+         { print }' /ttyd/index.html > /ttyd/index.new; \
+    mv /ttyd/index.new /ttyd/index.html; \
+    grep -q 'registerOscHandler(7681' /ttyd/index.html
+
 WORKDIR /src
 COPY . .
 # Alpine's Rust targets musl, so the games are static and need nothing else.
@@ -92,4 +104,4 @@ CMD ["--writable", "--port", "7681", "--max-clients", "32", \
      "--client-option", "disableLeaveAlert=true", \
      "--client-option", "scrollback=0", \
      "--client-option", "theme={\"background\":\"#000000\"}", \
-     "/arcade", "--session-saves"]
+     "/arcade", "--session-saves", "--browser-saves"]

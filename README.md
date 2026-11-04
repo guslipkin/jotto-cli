@@ -112,9 +112,9 @@ docker run --rm -p 7681:7681 --read-only --tmpfs /tmp:mode=1777 \
   ghcr.io/guslipkin/jotto-arcade:latest
 ```
 
-Then open <http://localhost:7681>. Each browser tab gets its own session: a menu of the four games, each played in its full-screen TUI. Leaving a game (`Esc`) always comes back to the menu, and the menu's **Quit** (or `q` / `Esc`) ends the session; reload the page for a new one. Players never get a command line: the image is built `FROM scratch`, with nothing in it but `arcade` (which has the four games built in, so it never starts another program) and [ttyd](https://github.com/tsl0922/ttyd), the web terminal, which runs only the menu. Saves are kept for the session alone, in memory, and are gone when it ends.
+Then open <http://localhost:7681>. Each browser tab gets its own session: a menu of the four games, each played in its full-screen TUI. Leaving a game (`Esc`) always comes back to the menu, and the menu's **Quit** (or `q` / `Esc`) ends the session; reload the page for a new one. Players never get a command line: the image is built `FROM scratch`, with nothing in it but `arcade` (which has the four games built in, so it never starts another program) and [ttyd](https://github.com/tsl0922/ttyd), the web terminal, which runs only the menu. Each session's saves are its own, in memory, and gone from the server when it ends, but they're kept in your browser (its local storage, for this site): the next session, in this browser, picks them up, a game in progress included. Each game's save is kept on its own, so two tabs playing different games don't overwrite each other (two playing the same game: the one that saved last wins). Another browser, a private window, or clearing the site's data starts afresh.
 
-The container is read-only, with every capability dropped and no privilege escalation; ttyd allows up to 32 sessions at once (change `--max-clients` in the `Dockerfile`'s `CMD`). To build for both architectures, use `docker buildx build --platform linux/amd64,linux/arm64 .`. GitHub Actions also builds both (on native x86_64 and arm64 runners) and pushes them to `ghcr.io/guslipkin/jotto-arcade` as one image: every commit to `main` as `latest` and `sha-<commit>`, and each published GitHub Release as its version (`1.2.3` and `1.2`), on the same rules as the binaries' release workflow. `latest` follows `main`, so a release of an older commit never moves it back. Running the Docker workflow by hand only builds it. Each session runs `arcade --session-saves` (see [Usage](#usage)).
+The container is read-only, with every capability dropped and no privilege escalation; ttyd allows up to 32 sessions at once (change `--max-clients` in the `Dockerfile`'s `CMD`). To build for both architectures, use `docker buildx build --platform linux/amd64,linux/arm64 .`. GitHub Actions also builds both (on native x86_64 and arm64 runners) and pushes them to `ghcr.io/guslipkin/jotto-arcade` as one image: every commit to `main` as `latest` and `sha-<commit>`, and each published GitHub Release as its version (`1.2.3` and `1.2`), on the same rules as the binaries' release workflow. `latest` follows `main`, so a release of an older commit never moves it back. Running the Docker workflow by hand only builds it. Each session runs `arcade --session-saves --browser-saves` (see [Usage](#usage)); the page passes saves to and from it as escape sequences through the terminal (`docker/browser-saves.js`).
 
 ## Usage
 
@@ -129,7 +129,8 @@ contexto
 # Or pick any of them from a menu (keys or mouse): leaving a game comes back to
 # it, and quitting it returns to your shell. Games resume and save just as their own commands do.
 arcade
-arcade --session-saves   # saves kept for this run only, then removed (as the Docker image does)
+arcade --session-saves   # saves kept for this run only, then removed
+arcade --session-saves --browser-saves   # and kept by the Docker image's page in the browser
 
 # Or play one directly through arcade, with any of that game's options below
 # (the same as running `flights --plain`, and how the linked commands work)
